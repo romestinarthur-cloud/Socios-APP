@@ -1,41 +1,34 @@
 """
-Stockage local (SQLite) de l'historique des saisies utilisateur :
-pour un club donné, à une date donnée, combien de tokens détenus
-et combien de points de récompense par jour cela a rapporté.
+Stockage distant (PostgreSQL via Supabase) de l'historique des saisies
+utilisateur : pour un club donné, à une date donnée, combien de tokens
+détenus et combien de points de récompense par jour cela a rapporté.
 
-Le fichier socios_data.db est créé à côté de ce script et persiste
-d'un lancement à l'autre de l'application.
+La chaîne de connexion vient de st.secrets["DATABASE_URL"] (configurée dans
+les "Secrets" de Streamlit Cloud, jamais commitée dans le code / GitHub).
 """
 
-import sqlite3
-from pathlib import Path
+import streamlit as st
+import psycopg2
+import psycopg2.extras
 from datetime import datetime
 
-DB_PATH = Path(__file__).parent / "socios_data.db"
-
-# Table de correspondance club -> token CoinGecko, mémorisée une fois
-# validée/corrigée manuellement par l'utilisateur dans l'interface.
 MAPPING_TABLE = "club_token_mapping"
 ENTRIES_TABLE = "entries"
 MANUAL_PRICE_TABLE = "manual_prices"
-# Table séparée du prix : "ce club n'a pas de token" est une décision qui doit
-# être mémorisée même AVANT qu'un prix ait été tapé, et qui doit résister à un
-# rafraîchissement (sinon un nouveau matching automatique l'écraserait).
 NO_TOKEN_TABLE = "no_token_flags"
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg2.connect(st.secrets["DATABASE_URL"])
 
 
 def init_db():
     conn = get_conn()
-    conn.execute(
+    cur = conn.cursor()
+    cur.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {ENTRIES_TABLE} (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             club TEXT NOT NULL,
             entry_date TEXT NOT NULL,
             tokens_qty REAL NOT NULL,
@@ -45,7 +38,7 @@ def init_db():
         )
         """
     )
-    conn.execute(
+    cur.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {MAPPING_TABLE} (
             club TEXT PRIMARY KEY,
@@ -53,7 +46,7 @@ def init_db():
         )
         """
     )
-    conn.execute(
+    cur.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {MANUAL_PRICE_TABLE} (
             club TEXT PRIMARY KEY,
@@ -62,28 +55,25 @@ def init_db():
         )
         """
     )
-    conn.execute(
+    cur.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {NO_TOKEN_TABLE} (
             club TEXT PRIMARY KEY
         )
         """
     )
-    # Migration : si la base existait déjà avant l'ajout de la colonne currency,
-    # CREATE TABLE IF NOT EXISTS ci-dessus ne l'ajoute pas — on le fait à la main.
-    existing_cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({MANUAL_PRICE_TABLE})")}
-    if "currency" not in existing_cols:
-        conn.execute(f"ALTER TABLE {MANUAL_PRICE_TABLE} ADD COLUMN currency TEXT")
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def add_entry(club: str, tokens_qty: float, points_per_day: float, price_at_entry: float | None,
               entry_date: str | None = None):
     conn = get_conn()
-    conn.execute(
+    cur = conn.cursor()
+    cur.execute(
         f"""INSERT INTO {ENTRIES_TABLE} (club, entry_date, tokens_qty, points_per_day, price_at_entry, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)""",
+            VALUES (%s, %s, %s, %s, %s, %s)""",
         (
             club,
             entry_date or datetime.now().strftime("%Y-%m-%d"),
@@ -94,35 +84,44 @@ def add_entry(club: str, tokens_qty: float, points_per_day: float, price_at_entr
         ),
     )
     conn.commit()
+    cur.close()
     conn.close()
 
 
-def get_all_entries() -> list[sqlite3.Row]:
+def get_all_entries() -> list[dict]:
     conn = get_conn()
-    rows = conn.execute(f"SELECT * FROM {ENTRIES_TABLE} ORDER BY entry_date ASC, id ASC").fetchall()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(f"SELECT * FROM {ENTRIES_TABLE} ORDER BY entry_date ASC, id ASC")
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     return rows
 
 
 def get_latest_entry_per_club() -> dict:
-    """dict club -> dernière ligne (Row) saisie."""
+    """dict club -> dernière ligne (dict) saisie."""
     conn = get_conn()
-    rows = conn.execute(
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
         f"""
         SELECT e.* FROM {ENTRIES_TABLE} e
         INNER JOIN (
             SELECT club, MAX(id) AS max_id FROM {ENTRIES_TABLE} GROUP BY club
         ) latest ON e.club = latest.club AND e.id = latest.max_id
         """
-    ).fetchall()
+    )
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     return {r["club"]: r for r in rows}
 
 
 def delete_entry(entry_id: int):
     conn = get_conn()
-    conn.execute(f"DELETE FROM {ENTRIES_TABLE} WHERE id = ?", (entry_id,))
+    cur = conn.cursor()
+    cur.execute(f"DELETE FROM {ENTRIES_TABLE} WHERE id = %s", (entry_id,))
     conn.commit()
+    cur.close()
     conn.close()
 
 
@@ -131,25 +130,29 @@ def save_manual_price(club: str, price: float | None, currency: str | None = Non
     il a été tapé (essentiel : un prix EUR affiché tel quel après passage en USD
     serait faux). Passer price=None supprime la saisie manuelle."""
     conn = get_conn()
+    cur = conn.cursor()
     if price is None:
-        conn.execute(f"DELETE FROM {MANUAL_PRICE_TABLE} WHERE club = ?", (club,))
+        cur.execute(f"DELETE FROM {MANUAL_PRICE_TABLE} WHERE club = %s", (club,))
     else:
-        conn.execute(
-            f"INSERT INTO {MANUAL_PRICE_TABLE} (club, price, currency) VALUES (?, ?, ?) "
-            f"ON CONFLICT(club) DO UPDATE SET price=excluded.price, currency=excluded.currency",
+        cur.execute(
+            f"""INSERT INTO {MANUAL_PRICE_TABLE} (club, price, currency) VALUES (%s, %s, %s)
+                ON CONFLICT (club) DO UPDATE SET price = EXCLUDED.price, currency = EXCLUDED.currency""",
             (club, price, currency),
         )
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def get_manual_prices() -> dict:
-    """dict club -> {"price": float, "currency": str|None}. currency=None pour
-    d'anciennes saisies faites avant l'ajout de ce champ (à ressaisir)."""
+    """dict club -> {"price": float, "currency": str|None}."""
     conn = get_conn()
-    rows = conn.execute(f"SELECT club, price, currency FROM {MANUAL_PRICE_TABLE}").fetchall()
+    cur = conn.cursor()
+    cur.execute(f"SELECT club, price, currency FROM {MANUAL_PRICE_TABLE}")
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
-    return {r["club"]: {"price": r["price"], "currency": r["currency"]} for r in rows}
+    return {r[0]: {"price": r[1], "currency": r[2]} for r in rows}
 
 
 def save_no_token_flag(club: str, flagged: bool):
@@ -157,37 +160,47 @@ def save_no_token_flag(club: str, flagged: bool):
     du fait qu'un prix ait déjà été tapé ou non. Persiste entre les sessions et
     entre deux rafraîchissements."""
     conn = get_conn()
+    cur = conn.cursor()
     if flagged:
-        conn.execute(
-            f"INSERT INTO {NO_TOKEN_TABLE} (club) VALUES (?) ON CONFLICT(club) DO NOTHING",
+        cur.execute(
+            f"INSERT INTO {NO_TOKEN_TABLE} (club) VALUES (%s) ON CONFLICT (club) DO NOTHING",
             (club,),
         )
     else:
-        conn.execute(f"DELETE FROM {NO_TOKEN_TABLE} WHERE club = ?", (club,))
+        cur.execute(f"DELETE FROM {NO_TOKEN_TABLE} WHERE club = %s", (club,))
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def get_no_token_flags() -> set:
     conn = get_conn()
-    rows = conn.execute(f"SELECT club FROM {NO_TOKEN_TABLE}").fetchall()
+    cur = conn.cursor()
+    cur.execute(f"SELECT club FROM {NO_TOKEN_TABLE}")
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
-    return {r["club"] for r in rows}
+    return {r[0] for r in rows}
 
 
 def save_mapping(club: str, token_id: str | None):
     conn = get_conn()
-    conn.execute(
-        f"INSERT INTO {MAPPING_TABLE} (club, token_id) VALUES (?, ?) "
-        f"ON CONFLICT(club) DO UPDATE SET token_id=excluded.token_id",
+    cur = conn.cursor()
+    cur.execute(
+        f"""INSERT INTO {MAPPING_TABLE} (club, token_id) VALUES (%s, %s)
+            ON CONFLICT (club) DO UPDATE SET token_id = EXCLUDED.token_id""",
         (club, token_id),
     )
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def get_saved_mappings() -> dict:
     conn = get_conn()
-    rows = conn.execute(f"SELECT club, token_id FROM {MAPPING_TABLE}").fetchall()
+    cur = conn.cursor()
+    cur.execute(f"SELECT club, token_id FROM {MAPPING_TABLE}")
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
-    return {r["club"]: r["token_id"] for r in rows}
+    return {r[0]: r[1] for r in rows}
