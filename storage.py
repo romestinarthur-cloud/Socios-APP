@@ -5,6 +5,10 @@ détenus et combien de points de récompense par jour cela a rapporté.
 
 La chaîne de connexion vient de st.secrets["DATABASE_URL"] (configurée dans
 les "Secrets" de Streamlit Cloud, jamais commitée dans le code / GitHub).
+
+Optimisation importante : une seule connexion réseau est ouverte et
+réutilisée (via st.cache_resource) au lieu d'en ouvrir/fermer une à chaque
+appel, ce qui évite plusieurs secondes de latence à chaque interaction.
 """
 
 import streamlit as st
@@ -18,8 +22,26 @@ MANUAL_PRICE_TABLE = "manual_prices"
 NO_TOKEN_TABLE = "no_token_flags"
 
 
+@st.cache_resource(show_spinner=False)
+def _get_conn():
+    conn = psycopg2.connect(st.secrets["DATABASE_URL"])
+    conn.autocommit = False
+    return conn
+
+
 def get_conn():
-    return psycopg2.connect(st.secrets["DATABASE_URL"])
+    """Réutilise une connexion existante ; la reconnecte si elle a expiré
+    (Supabase peut fermer une connexion inactive après un moment)."""
+    conn = _get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.close()
+        conn.rollback()
+    except Exception:
+        _get_conn.clear()
+        conn = _get_conn()
+    return conn
 
 
 def init_db():
@@ -64,7 +86,6 @@ def init_db():
     )
     conn.commit()
     cur.close()
-    conn.close()
 
 
 def add_entry(club: str, tokens_qty: float, points_per_day: float, price_at_entry: float | None,
@@ -85,7 +106,37 @@ def add_entry(club: str, tokens_qty: float, points_per_day: float, price_at_entr
     )
     conn.commit()
     cur.close()
-    conn.close()
+
+
+def add_entries_bulk(entries: list[dict]):
+    """Enregistre plusieurs saisies en une seule transaction (une seule
+    connexion réseau utilisée) au lieu d'un aller-retour par club — bien plus
+    rapide quand on saisit beaucoup de clubs d'un coup.
+    Chaque dict : {club, tokens_qty, points_per_day, price_at_entry, entry_date?}"""
+    if not entries:
+        return
+    conn = get_conn()
+    cur = conn.cursor()
+    now = datetime.now()
+    values = [
+        (
+            e["club"],
+            e.get("entry_date") or now.strftime("%Y-%m-%d"),
+            e["tokens_qty"],
+            e["points_per_day"],
+            e.get("price_at_entry"),
+            now.isoformat(timespec="seconds"),
+        )
+        for e in entries
+    ]
+    psycopg2.extras.execute_values(
+        cur,
+        f"""INSERT INTO {ENTRIES_TABLE} (club, entry_date, tokens_qty, points_per_day, price_at_entry, created_at)
+            VALUES %s""",
+        values,
+    )
+    conn.commit()
+    cur.close()
 
 
 def get_all_entries() -> list[dict]:
@@ -94,8 +145,7 @@ def get_all_entries() -> list[dict]:
     cur.execute(f"SELECT * FROM {ENTRIES_TABLE} ORDER BY entry_date ASC, id ASC")
     rows = cur.fetchall()
     cur.close()
-    conn.close()
-    return rows
+    return [dict(r) for r in rows]
 
 
 def get_latest_entry_per_club() -> dict:
@@ -112,8 +162,20 @@ def get_latest_entry_per_club() -> dict:
     )
     rows = cur.fetchall()
     cur.close()
-    conn.close()
-    return {r["club"]: r for r in rows}
+    return {r["club"]: dict(r) for r in rows}
+
+
+def update_entry(entry_id: int, tokens_qty: float, points_per_day: float, entry_date: str):
+    """Corrige une saisie passée (ex : erreur de frappe sur les points/jour)."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        f"""UPDATE {ENTRIES_TABLE} SET tokens_qty = %s, points_per_day = %s, entry_date = %s
+            WHERE id = %s""",
+        (tokens_qty, points_per_day, entry_date, entry_id),
+    )
+    conn.commit()
+    cur.close()
 
 
 def delete_entry(entry_id: int):
@@ -122,7 +184,6 @@ def delete_entry(entry_id: int):
     cur.execute(f"DELETE FROM {ENTRIES_TABLE} WHERE id = %s", (entry_id,))
     conn.commit()
     cur.close()
-    conn.close()
 
 
 def save_manual_price(club: str, price: float | None, currency: str | None = None):
@@ -141,7 +202,6 @@ def save_manual_price(club: str, price: float | None, currency: str | None = Non
         )
     conn.commit()
     cur.close()
-    conn.close()
 
 
 def get_manual_prices() -> dict:
@@ -151,7 +211,6 @@ def get_manual_prices() -> dict:
     cur.execute(f"SELECT club, price, currency FROM {MANUAL_PRICE_TABLE}")
     rows = cur.fetchall()
     cur.close()
-    conn.close()
     return {r[0]: {"price": r[1], "currency": r[2]} for r in rows}
 
 
@@ -170,7 +229,6 @@ def save_no_token_flag(club: str, flagged: bool):
         cur.execute(f"DELETE FROM {NO_TOKEN_TABLE} WHERE club = %s", (club,))
     conn.commit()
     cur.close()
-    conn.close()
 
 
 def get_no_token_flags() -> set:
@@ -179,7 +237,6 @@ def get_no_token_flags() -> set:
     cur.execute(f"SELECT club FROM {NO_TOKEN_TABLE}")
     rows = cur.fetchall()
     cur.close()
-    conn.close()
     return {r[0] for r in rows}
 
 
@@ -193,7 +250,6 @@ def save_mapping(club: str, token_id: str | None):
     )
     conn.commit()
     cur.close()
-    conn.close()
 
 
 def get_saved_mappings() -> dict:
@@ -202,5 +258,4 @@ def get_saved_mappings() -> dict:
     cur.execute(f"SELECT club, token_id FROM {MAPPING_TABLE}")
     rows = cur.fetchall()
     cur.close()
-    conn.close()
     return {r[0]: r[1] for r in rows}
