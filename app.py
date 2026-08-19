@@ -10,44 +10,6 @@ SOCIOS_LOGO_URL = "https://logowik.com/content/uploads/images/socioscom4620.jpg"
 
 st.set_page_config(page_title="Socios – Rendement des Fan Tokens", page_icon="⚽", layout="wide")
 
-# --- Protection par mot de passe simple ---------------------------------
-# Le mot de passe est stocké dans les Secrets de Streamlit Cloud
-# (st.secrets["APP_PASSWORD"]), jamais dans le code.
-if not st.session_state.get("authed", False):
-    st.markdown(
-        f"""
-        <style>
-        .stApp {{ background: radial-gradient(circle at 30% 20%, #241a35 0%, #0f1117 55%); }}
-        input {{ background-color:#1a1d29!important; color:#f5f6fa!important; }}
-        label, p, h1, h2, h3 {{ color:#f5f6fa!important; }}
-        .login-card {{
-            max-width: 380px; margin: 4rem auto 0 auto; padding: 2rem 2rem 1.6rem 2rem;
-            background: #171a25; border: 1px solid #2f3345; border-radius: 18px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.4); text-align: center;
-        }}
-        .login-card img {{ max-width: 180px; border-radius: 8px; margin-bottom: 1.2rem; }}
-        .login-card h2 {{ margin: 0 0 0.3rem 0; font-size: 1.25rem; }}
-        .login-card .subtitle {{ color: #9ba0b8 !important; font-size: 0.85rem; margin-bottom: 1.2rem; }}
-        div[data-testid="stTextInput"] {{ max-width: 380px; margin: 0 auto; }}
-        div.stButton {{ max-width: 380px; margin: 0.5rem auto 0 auto; }}
-        </style>
-        <div class="login-card">
-            <img src="{SOCIOS_LOGO_URL}" />
-            <h2>⚽ Rendement des Fan Tokens</h2>
-            <div class="subtitle">Accès privé — connecte-toi pour continuer</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    pwd = st.text_input("Mot de passe", type="password", label_visibility="collapsed", placeholder="Mot de passe")
-    if st.button("Se connecter", use_container_width=True):
-        if pwd == st.secrets.get("APP_PASSWORD"):
-            st.session_state["authed"] = True
-            st.rerun()
-        else:
-            st.error("Mot de passe incorrect.")
-    st.stop()
-
 storage.init_db()
 
 st.markdown(
