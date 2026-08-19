@@ -349,43 +349,48 @@ with tab_dashboard:
     st.caption("Tu peux corriger un prix directement dans la colonne « Prix » ci-dessous, puis cliquer sur Enregistrer.")
 
     price_col = f"Prix ({devise.upper()})"
-    display_df = matched_df[["logo", "name", "token_symbol", "price", "24h", "tokens_pour_capital"]].rename(
-        columns={
-            "logo": "Logo",
-            "name": "Club",
-            "token_symbol": "Token",
-            "price": price_col,
-            "24h": "24h",
-            "tokens_pour_capital": f"Tokens pour {capital:.0f}{devise.upper()}",
-        }
-    )
-    edited_df = st.data_editor(
-        display_df,
-        column_config={
-            "Logo": st.column_config.ImageColumn("Logo", width="small"),
-            "Club": st.column_config.TextColumn(disabled=True),
-            "Token": st.column_config.TextColumn(disabled=True),
-            price_col: st.column_config.NumberColumn(format="%.5f", min_value=0.0, step=0.001),
-            "24h": st.column_config.NumberColumn(disabled=True, format="%.2f%%"),
-            f"Tokens pour {capital:.0f}{devise.upper()}": st.column_config.NumberColumn(disabled=True),
-        },
-        disabled=["Logo"],
-        hide_index=True,
-        use_container_width=True,
-        key="matched_price_editor",
-    )
-    if st.button("💾 Enregistrer les prix corrigés"):
-        changed = 0
-        for i in edited_df.index:
-            new_price = edited_df.loc[i, price_col]
-            old_price = display_df.loc[i, price_col]
-            if pd.notna(new_price) and new_price != old_price and new_price > 0:
-                storage.save_manual_price(edited_df.loc[i, "Club"], float(new_price), devise)
-                changed += 1
-        if changed:
-            st.rerun()
-        else:
-            st.toast("Aucun prix modifié.", icon="ℹ️")
+
+    @st.fragment
+    def _price_editor_fragment():
+        display_df = matched_df[["logo", "name", "token_symbol", "price", "24h", "tokens_pour_capital"]].rename(
+            columns={
+                "logo": "Logo",
+                "name": "Club",
+                "token_symbol": "Token",
+                "price": price_col,
+                "24h": "24h",
+                "tokens_pour_capital": f"Tokens pour {capital:.0f}{devise.upper()}",
+            }
+        )
+        edited_df = st.data_editor(
+            display_df,
+            column_config={
+                "Logo": st.column_config.ImageColumn("Logo", width="small"),
+                "Club": st.column_config.TextColumn(disabled=True),
+                "Token": st.column_config.TextColumn(disabled=True),
+                price_col: st.column_config.NumberColumn(format="%.5f", min_value=0.0, step=0.001),
+                "24h": st.column_config.NumberColumn(disabled=True, format="%.2f%%"),
+                f"Tokens pour {capital:.0f}{devise.upper()}": st.column_config.NumberColumn(disabled=True),
+            },
+            disabled=["Logo"],
+            hide_index=True,
+            use_container_width=True,
+            key="matched_price_editor",
+        )
+        if st.button("💾 Enregistrer les prix corrigés"):
+            changed = 0
+            for i in edited_df.index:
+                new_price = edited_df.loc[i, price_col]
+                old_price = display_df.loc[i, price_col]
+                if pd.notna(new_price) and new_price != old_price and new_price > 0:
+                    storage.save_manual_price(edited_df.loc[i, "Club"], float(new_price), devise)
+                    changed += 1
+            if changed:
+                st.rerun()  # rerun complet nécessaire : le prix impacte d'autres onglets
+            else:
+                st.toast("Aucun prix modifié.", icon="ℹ️")
+
+    _price_editor_fragment()
 
     st.divider()
     st.markdown("#### Saisir les points gagnés / jour")
@@ -418,43 +423,48 @@ with tab_dashboard:
     # pour repérer visuellement ceux à mettre à jour en premier.
     input_rows = input_rows.sort_values("name").drop(columns=["_days"])
     input_rows["points_par_jour"] = None
-    input_edited = st.data_editor(
-        input_rows.rename(
-            columns={
-                "name": "Club",
-                "price": "Prix",
-                "tokens_pour_capital": "Nb tokens",
-            }
-        ),
-        column_config={
-            "Club": st.column_config.TextColumn(disabled=True),
-            "Prix": st.column_config.NumberColumn(disabled=True, format="%.5f"),
-            "Nb tokens": st.column_config.NumberColumn(disabled=True),
-            "Dernière saisie": st.column_config.TextColumn(disabled=True),
-            "points_par_jour": st.column_config.NumberColumn("Points / jour", min_value=0.0, step=0.1),
-        },
-        column_order=["Club", "Dernière saisie", "Prix", "Nb tokens", "points_par_jour"],
-        hide_index=True,
-        use_container_width=True,
-        key="input_table",
-    )
 
-    if st.button("💾 Enregistrer les saisies", type="primary"):
-        to_save = [
-            {
-                "club": r["Club"],
-                "tokens_qty": float(r["Nb tokens"]),
-                "points_per_day": float(r["points_par_jour"]),
-                "price_at_entry": float(r["Prix"]) if pd.notna(r["Prix"]) else None,
-            }
-            for _, r in input_edited.iterrows()
-            if pd.notna(r["points_par_jour"]) and r["points_par_jour"] not in (None, 0)
-        ]
-        if to_save:
-            storage.add_entries_bulk(to_save)  # une seule requête pour tout le lot
-            st.success(f"{len(to_save)} saisie(s) enregistrée(s) le {datetime.now().strftime('%d/%m/%Y')}.")
-        else:
-            st.warning("Aucune valeur de points/jour renseignée.")
+    @st.fragment
+    def _saisie_fragment():
+        input_edited = st.data_editor(
+            input_rows.rename(
+                columns={
+                    "name": "Club",
+                    "price": "Prix",
+                    "tokens_pour_capital": "Nb tokens",
+                }
+            ),
+            column_config={
+                "Club": st.column_config.TextColumn(disabled=True),
+                "Prix": st.column_config.NumberColumn(disabled=True, format="%.5f"),
+                "Nb tokens": st.column_config.NumberColumn(disabled=True),
+                "Dernière saisie": st.column_config.TextColumn(disabled=True),
+                "points_par_jour": st.column_config.NumberColumn("Points / jour", min_value=0.0, step=0.1),
+            },
+            column_order=["Club", "Dernière saisie", "Prix", "Nb tokens", "points_par_jour"],
+            hide_index=True,
+            use_container_width=True,
+            key="input_table",
+        )
+
+        if st.button("💾 Enregistrer les saisies", type="primary"):
+            to_save = [
+                {
+                    "club": r["Club"],
+                    "tokens_qty": float(r["Nb tokens"]),
+                    "points_per_day": float(r["points_par_jour"]),
+                    "price_at_entry": float(r["Prix"]) if pd.notna(r["Prix"]) else None,
+                }
+                for _, r in input_edited.iterrows()
+                if pd.notna(r["points_par_jour"]) and r["points_par_jour"] not in (None, 0)
+            ]
+            if to_save:
+                storage.add_entries_bulk(to_save)  # une seule requête pour tout le lot
+                st.success(f"{len(to_save)} saisie(s) enregistrée(s) le {datetime.now().strftime('%d/%m/%Y')}.")
+            else:
+                st.warning("Aucune valeur de points/jour renseignée.")
+
+    _saisie_fragment()
 
 # ---------------------------------------------------------------------------
 # Tab 2 : correspondances / corrections manuelles
@@ -548,7 +558,19 @@ with tab_ranking:
 
             top = rank_df.head(10).copy().sort_values(rank_col, ascending=True)
             st.markdown("##### 🏆 Top 10 — points/jour actualisés")
-            st.bar_chart(top.set_index("Club")[rank_col], horizontal=True, color="#f107a3")
+            # st.bar_chart ne garantissait pas l'ordre des barres — on force le tri
+            # explicitement via Altair (sort par valeur décroissante, du haut vers le bas).
+            import altair as alt
+            chart = (
+                alt.Chart(top)
+                .mark_bar(color="#f107a3")
+                .encode(
+                    x=alt.X(f"{rank_col}:Q", title=rank_col),
+                    y=alt.Y("Club:N", sort=alt.EncodingSortField(field=rank_col, order="descending"), title=None),
+                )
+                .properties(height=32 * len(top))
+            )
+            st.altair_chart(chart, use_container_width=True)
 
             st.markdown("##### Classement complet")
             st.dataframe(
@@ -578,13 +600,29 @@ with tab_history:
         hist_df = pd.DataFrame([dict(r) for r in all_entries])
         hist_df["rendement_par_token"] = hist_df["points_per_day"] / hist_df["tokens_qty"]
         clubs = sorted(hist_df["club"].unique())
-        chosen = st.multiselect("Clubs à afficher", clubs, default=clubs[: min(5, len(clubs))])
-        if chosen:
-            plot_df = hist_df[hist_df["club"].isin(chosen)].pivot_table(
-                index="entry_date", columns="club", values="rendement_par_token", aggfunc="mean"
-            )
-            st.line_chart(plot_df)
-            st.caption("Points de récompense par token et par jour, au fil de tes saisies.")
+
+        @st.fragment
+        def _evolution_fragment():
+            chosen = st.multiselect("Clubs à afficher", clubs, default=clubs[: min(5, len(clubs))])
+            if chosen:
+                plot_df = hist_df[hist_df["club"].isin(chosen)][
+                    ["entry_date", "club", "rendement_par_token"]
+                ].sort_values("entry_date")
+                # Points + lignes (visible même avec une seule date par club, contrairement
+                # à st.line_chart qui n'affiche rien s'il n'y a qu'un point).
+                import altair as alt
+                base = alt.Chart(plot_df).encode(
+                    x=alt.X("entry_date:N", title="Date"),
+                    y=alt.Y("rendement_par_token:Q", title="Points / token / jour"),
+                    color=alt.Color("club:N", title="Club"),
+                )
+                chart = (base.mark_line(point=True) + base.mark_point(size=60)).properties(height=380)
+                st.altair_chart(chart, use_container_width=True)
+                st.caption("Points de récompense par token et par jour, au fil de tes saisies.")
+            else:
+                st.info("Sélectionne au moins un club pour afficher le graphique.")
+
+        _evolution_fragment()
         with st.expander("Voir toutes les saisies (modifier ou supprimer une entrée)"):
             st.caption("Tu peux corriger une valeur erronée directement dans les cases ci-dessous, puis Enregistrer.")
             hist_edit_df = pd.DataFrame([dict(r) for r in all_entries])[
