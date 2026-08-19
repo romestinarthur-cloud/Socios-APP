@@ -413,7 +413,10 @@ with tab_dashboard:
     input_rows["Dernière saisie"] = input_rows["_days"].apply(
         lambda d: "Jamais" if d >= 99999 else ("Aujourd'hui" if d == 0 else f"Il y a {d} j")
     )
-    input_rows = input_rows.sort_values("_days", ascending=False).drop(columns=["_days"])
+    # Ordre alphabétique fixe (le tri par ancienneté changeait l'ordre de façon
+    # déroutante d'une saisie à l'autre) — la colonne "Dernière saisie" suffit
+    # pour repérer visuellement ceux à mettre à jour en premier.
+    input_rows = input_rows.sort_values("name").drop(columns=["_days"])
     input_rows["points_par_jour"] = None
     input_edited = st.data_editor(
         input_rows.rename(
@@ -437,18 +440,19 @@ with tab_dashboard:
     )
 
     if st.button("💾 Enregistrer les saisies", type="primary"):
-        saved = 0
-        for _, r in input_edited.iterrows():
-            if pd.notna(r["points_par_jour"]) and r["points_par_jour"] not in (None, 0):
-                storage.add_entry(
-                    club=r["Club"],
-                    tokens_qty=float(r["Nb tokens"]),
-                    points_per_day=float(r["points_par_jour"]),
-                    price_at_entry=float(r["Prix"]) if pd.notna(r["Prix"]) else None,
-                )
-                saved += 1
-        if saved:
-            st.success(f"{saved} saisie(s) enregistrée(s) le {datetime.now().strftime('%d/%m/%Y')}.")
+        to_save = [
+            {
+                "club": r["Club"],
+                "tokens_qty": float(r["Nb tokens"]),
+                "points_per_day": float(r["points_par_jour"]),
+                "price_at_entry": float(r["Prix"]) if pd.notna(r["Prix"]) else None,
+            }
+            for _, r in input_edited.iterrows()
+            if pd.notna(r["points_par_jour"]) and r["points_par_jour"] not in (None, 0)
+        ]
+        if to_save:
+            storage.add_entries_bulk(to_save)  # une seule requête pour tout le lot
+            st.success(f"{len(to_save)} saisie(s) enregistrée(s) le {datetime.now().strftime('%d/%m/%Y')}.")
         else:
             st.warning("Aucune valeur de points/jour renseignée.")
 
@@ -581,7 +585,45 @@ with tab_history:
             )
             st.line_chart(plot_df)
             st.caption("Points de récompense par token et par jour, au fil de tes saisies.")
-        with st.expander("Voir toutes les saisies (et supprimer une entrée)"):
+        with st.expander("Voir toutes les saisies (modifier ou supprimer une entrée)"):
+            st.caption("Tu peux corriger une valeur erronée directement dans les cases ci-dessous, puis Enregistrer.")
+            hist_edit_df = pd.DataFrame([dict(r) for r in all_entries])[
+                ["id", "club", "entry_date", "tokens_qty", "points_per_day"]
+            ].rename(columns={
+                "id": "ID", "club": "Club", "entry_date": "Date",
+                "tokens_qty": "Tokens", "points_per_day": "Points/jour",
+            })
+            edited_hist = st.data_editor(
+                hist_edit_df,
+                column_config={
+                    "ID": st.column_config.NumberColumn(disabled=True),
+                    "Club": st.column_config.TextColumn(disabled=True),
+                    "Date": st.column_config.TextColumn(help="Format AAAA-MM-JJ"),
+                    "Tokens": st.column_config.NumberColumn(min_value=0.0, step=0.01),
+                    "Points/jour": st.column_config.NumberColumn(min_value=0.0, step=0.1),
+                },
+                hide_index=True,
+                use_container_width=True,
+                key="history_editor",
+            )
+            if st.button("💾 Enregistrer les corrections d'historique"):
+                changed = 0
+                for i in edited_hist.index:
+                    orig = hist_edit_df.loc[i]
+                    new = edited_hist.loc[i]
+                    if (new["Tokens"] != orig["Tokens"] or new["Points/jour"] != orig["Points/jour"]
+                            or new["Date"] != orig["Date"]):
+                        storage.update_entry(
+                            int(new["ID"]), float(new["Tokens"]), float(new["Points/jour"]), str(new["Date"])
+                        )
+                        changed += 1
+                if changed:
+                    st.success(f"{changed} saisie(s) corrigée(s).")
+                    st.rerun()
+                else:
+                    st.info("Aucune modification détectée.")
+
+            st.markdown("###### Supprimer une saisie")
             for r in all_entries:
                 c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 2, 1])
                 c1.write(r["club"])
