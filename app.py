@@ -6,7 +6,48 @@ import storage
 from teams_scraper import get_teams
 from prices import fetch_all_candidate_tokens, match_teams_to_tokens
 
+SOCIOS_LOGO_URL = "https://logowik.com/content/uploads/images/socioscom4620.jpg"
+
 st.set_page_config(page_title="Socios – Rendement des Fan Tokens", page_icon="⚽", layout="wide")
+
+# --- Protection par mot de passe simple ---------------------------------
+# Le mot de passe est stocké dans les Secrets de Streamlit Cloud
+# (st.secrets["APP_PASSWORD"]), jamais dans le code.
+if not st.session_state.get("authed", False):
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{ background: radial-gradient(circle at 30% 20%, #241a35 0%, #0f1117 55%); }}
+        input {{ background-color:#1a1d29!important; color:#f5f6fa!important; }}
+        label, p, h1, h2, h3 {{ color:#f5f6fa!important; }}
+        .login-card {{
+            max-width: 380px; margin: 4rem auto 0 auto; padding: 2rem 2rem 1.6rem 2rem;
+            background: #171a25; border: 1px solid #2f3345; border-radius: 18px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.4); text-align: center;
+        }}
+        .login-card img {{ max-width: 180px; border-radius: 8px; margin-bottom: 1.2rem; }}
+        .login-card h2 {{ margin: 0 0 0.3rem 0; font-size: 1.25rem; }}
+        .login-card .subtitle {{ color: #9ba0b8 !important; font-size: 0.85rem; margin-bottom: 1.2rem; }}
+        div[data-testid="stTextInput"] {{ max-width: 380px; margin: 0 auto; }}
+        div.stButton {{ max-width: 380px; margin: 0.5rem auto 0 auto; }}
+        </style>
+        <div class="login-card">
+            <img src="{SOCIOS_LOGO_URL}" />
+            <h2>⚽ Rendement des Fan Tokens</h2>
+            <div class="subtitle">Accès privé — connecte-toi pour continuer</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    pwd = st.text_input("Mot de passe", type="password", label_visibility="collapsed", placeholder="Mot de passe")
+    if st.button("Se connecter", use_container_width=True):
+        if pwd == st.secrets.get("APP_PASSWORD"):
+            st.session_state["authed"] = True
+            st.rerun()
+        else:
+            st.error("Mot de passe incorrect.")
+    st.stop()
+
 storage.init_db()
 
 st.markdown(
@@ -104,15 +145,23 @@ st.markdown(
     .socios-hero {
         background: linear-gradient(135deg, #7b2ff7 0%, #f107a3 100%);
         padding: 1.4rem 1.8rem; border-radius: 14px; margin-bottom: 1.2rem;
+        display: flex; align-items: center; gap: 1.1rem;
     }
+    .socios-hero img { height: 42px; border-radius: 6px; background: #fff; padding: 4px 8px; }
     .socios-hero h1 { color: #ffffff !important; margin: 0; font-size: 1.7rem; }
     .socios-hero p { color: #ffffff !important; opacity: 0.95; margin: 0.3rem 0 0 0; font-size: 0.9rem; }
     .metric-card {
-        background: #1a1d29; border: 1px solid #2f3345; border-radius: 12px;
-        padding: 0.9rem 1.1rem; text-align: center;
+        background: linear-gradient(160deg, #1c1f2e 0%, #171a25 100%);
+        border: 1px solid #2f3345; border-radius: 12px;
+        padding: 1rem 1.1rem; text-align: center;
+        transition: border-color 0.15s ease;
     }
-    .metric-card .value { font-size: 1.6rem; font-weight: 700; color: #ff4fc3 !important; }
-    .metric-card .label { font-size: 0.78rem; color: #c7cbdb !important; text-transform: uppercase; letter-spacing: 0.03em; }
+    .metric-card:hover { border-color: #f107a3; }
+    .metric-card .value { font-size: 1.7rem; font-weight: 700; color: #ff4fc3 !important; }
+    .metric-card .label { font-size: 0.75rem; color: #9ba0b8 !important; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 0.15rem; }
+    .price-up { color: #3ddc84 !important; font-weight: 600; }
+    .price-down { color: #ff5c7a !important; font-weight: 600; }
+    .sidebar-logo { display: block; margin: 0 auto 1rem auto; max-width: 150px; border-radius: 6px; }
     .manual-zone {
         background: #241a10; border: 1px solid #a56a1f; border-radius: 12px;
         padding: 1rem 1.2rem; margin-bottom: 1rem;
@@ -227,6 +276,7 @@ def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
 # Sidebar
 # ---------------------------------------------------------------------------
 
+st.sidebar.markdown(f'<img src="{SOCIOS_LOGO_URL}" class="sidebar-logo" />', unsafe_allow_html=True)
 st.sidebar.title("⚙️ Paramètres")
 capital = st.sidebar.number_input("Capital de référence (€)", min_value=1.0, value=100.0, step=10.0)
 devise = st.sidebar.selectbox("Devise", ["eur", "usd"], index=0)
@@ -261,8 +311,11 @@ st.sidebar.caption(f"{n_matched}/{len(df)} clubs avec un prix ({n_manual} saisis
 st.markdown(
     f"""
     <div class="socios-hero">
-        <h1>⚽ Socios — Rendement des Fan Tokens</h1>
-        <p>Prix via l'API publique CoinGecko · classement basé sur tes points de récompense saisis à la main</p>
+        <img src="{SOCIOS_LOGO_URL}" />
+        <div>
+            <h1>⚽ Socios — Rendement des Fan Tokens</h1>
+            <p>Prix via l'API publique CoinGecko · classement basé sur tes points de récompense saisis à la main</p>
+        </div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -328,17 +381,19 @@ with tab_dashboard:
         st.markdown('</div>', unsafe_allow_html=True)
 
     matched_df = df[df["matched"]].copy()
+    matched_df["24h"] = matched_df["price_change_24h"]
 
     st.subheader(f"Pour {capital:.0f} {devise.upper()} investis")
     st.caption("Tu peux corriger un prix directement dans la colonne « Prix » ci-dessous, puis cliquer sur Enregistrer.")
 
     price_col = f"Prix ({devise.upper()})"
-    display_df = matched_df[["logo", "name", "token_symbol", "price", "tokens_pour_capital"]].rename(
+    display_df = matched_df[["logo", "name", "token_symbol", "price", "24h", "tokens_pour_capital"]].rename(
         columns={
             "logo": "Logo",
             "name": "Club",
             "token_symbol": "Token",
             "price": price_col,
+            "24h": "24h",
             "tokens_pour_capital": f"Tokens pour {capital:.0f}{devise.upper()}",
         }
     )
@@ -349,6 +404,7 @@ with tab_dashboard:
             "Club": st.column_config.TextColumn(disabled=True),
             "Token": st.column_config.TextColumn(disabled=True),
             price_col: st.column_config.NumberColumn(format="%.5f", min_value=0.0, step=0.001),
+            "24h": st.column_config.NumberColumn(disabled=True, format="%.2f%%"),
             f"Tokens pour {capital:.0f}{devise.upper()}": st.column_config.NumberColumn(disabled=True),
         },
         disabled=["Logo"],
