@@ -391,10 +391,29 @@ with tab_dashboard:
     st.markdown("#### Saisir les points gagnés / jour")
     st.caption(
         "Pour chaque club, rentre le nombre de points de récompense (Reward Points) que "
-        "l'appli Socios t'affiche par jour, pour le nombre de tokens indiqué ci-dessus."
+        "l'appli Socios t'affiche par jour, pour le nombre de tokens indiqué ci-dessus. "
+        "Les clubs les moins récemment mis à jour sont en haut, pour savoir par où commencer."
     )
 
+    latest_entries = storage.get_latest_entry_per_club()
+    today = datetime.now().date()
+
+    def _days_since(club):
+        entry = latest_entries.get(club)
+        if not entry:
+            return 99999  # jamais saisi -> tout en haut
+        try:
+            d = datetime.strptime(entry["entry_date"], "%Y-%m-%d").date()
+            return (today - d).days
+        except Exception:
+            return 99999
+
     input_rows = matched_df[["name", "price", "tokens_pour_capital"]].copy()
+    input_rows["_days"] = input_rows["name"].apply(_days_since)
+    input_rows["Dernière saisie"] = input_rows["_days"].apply(
+        lambda d: "Jamais" if d >= 99999 else ("Aujourd'hui" if d == 0 else f"Il y a {d} j")
+    )
+    input_rows = input_rows.sort_values("_days", ascending=False).drop(columns=["_days"])
     input_rows["points_par_jour"] = None
     input_edited = st.data_editor(
         input_rows.rename(
@@ -408,8 +427,10 @@ with tab_dashboard:
             "Club": st.column_config.TextColumn(disabled=True),
             "Prix": st.column_config.NumberColumn(disabled=True, format="%.5f"),
             "Nb tokens": st.column_config.NumberColumn(disabled=True),
+            "Dernière saisie": st.column_config.TextColumn(disabled=True),
             "points_par_jour": st.column_config.NumberColumn("Points / jour", min_value=0.0, step=0.1),
         },
+        column_order=["Club", "Dernière saisie", "Prix", "Nb tokens", "points_par_jour"],
         hide_index=True,
         use_container_width=True,
         key="input_table",
@@ -488,6 +509,7 @@ with tab_ranking:
         st.info("Aucune saisie pour l'instant — va dans l'onglet **Saisie** pour commencer.")
     else:
         price_by_club = dict(zip(df["name"], df["price"]))
+        logo_by_club = dict(zip(df["name"], df["logo"]))
         rows = []
         for club, entry in latest.items():
             current_price = price_by_club.get(club)
@@ -506,11 +528,36 @@ with tab_ranking:
                 }
             )
         if rows:
-            rank_df = pd.DataFrame(rows).sort_values(
-                f"Points/jour pour {capital:.0f}{devise.upper()} (actualisé)", ascending=False
-            )
+            rank_col = f"Points/jour pour {capital:.0f}{devise.upper()} (actualisé)"
+            rank_df = pd.DataFrame(rows).sort_values(rank_col, ascending=False)
             rank_df.insert(0, "#", range(1, len(rank_df) + 1))
-            st.dataframe(rank_df, hide_index=True, use_container_width=True)
+
+            leader = rank_df.iloc[0]
+            lc1, lc2 = st.columns([0.15, 0.85])
+            with lc1:
+                st.image(logo_by_club.get(leader["Club"]), width=70)
+            with lc2:
+                st.markdown(
+                    f"##### 🥇 Meilleur rendement actuel : **{leader['Club']}**  \n"
+                    f"{leader[rank_col]:.3f} points/jour pour {capital:.0f}{devise.upper()} investis"
+                )
+
+            top = rank_df.head(10).copy().sort_values(rank_col, ascending=True)
+            st.markdown("##### 🏆 Top 10 — points/jour actualisés")
+            st.bar_chart(top.set_index("Club")[rank_col], horizontal=True, color="#f107a3")
+
+            st.markdown("##### Classement complet")
+            st.dataframe(
+                rank_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    rank_col: st.column_config.ProgressColumn(
+                        rank_col, format="%.3f",
+                        min_value=0.0, max_value=float(rank_df[rank_col].max()),
+                    ),
+                },
+            )
         else:
             st.info("Pas encore assez de données avec prix connu pour établir un classement.")
 
