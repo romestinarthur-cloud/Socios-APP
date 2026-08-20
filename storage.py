@@ -21,6 +21,7 @@ ENTRIES_TABLE = "entries"
 MANUAL_PRICE_TABLE = "manual_prices"
 NO_TOKEN_TABLE = "no_token_flags"
 RANK_SNAPSHOT_TABLE = "rank_snapshot"
+CLUB_LINKS_TABLE = "club_links"
 
 
 @st.cache_resource(show_spinner=False)
@@ -91,6 +92,14 @@ def init_db():
             club TEXT PRIMARY KEY,
             position INTEGER NOT NULL,
             snapshot_date TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {CLUB_LINKS_TABLE} (
+            club TEXT PRIMARY KEY,
+            url TEXT
         )
         """
     )
@@ -296,3 +305,30 @@ def save_rank_snapshot(positions: dict, snapshot_date: str):
         )
     conn.commit()
     cur.close()
+
+
+def save_club_link(club: str, url: str | None):
+    """Enregistre le lien direct vers la page Socios de ce club (pour un accès
+    rapide depuis l'onglet Saisie). url=None ou vide supprime le lien."""
+    conn = get_conn()
+    cur = conn.cursor()
+    if not url:
+        cur.execute(f"DELETE FROM {CLUB_LINKS_TABLE} WHERE club = %s", (club,))
+    else:
+        cur.execute(
+            f"""INSERT INTO {CLUB_LINKS_TABLE} (club, url) VALUES (%s, %s)
+                ON CONFLICT (club) DO UPDATE SET url = EXCLUDED.url""",
+            (club, url),
+        )
+    conn.commit()
+    cur.close()
+
+
+def get_club_links() -> dict:
+    """dict club -> url"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(f"SELECT club, url FROM {CLUB_LINKS_TABLE}")
+    rows = cur.fetchall()
+    cur.close()
+    return {r[0]: r[1] for r in rows}
