@@ -115,9 +115,20 @@ def _parse_fr_number(raw: str) -> float:
 
 def fetch_fantoken_page(slug: str, timeout: int = 15):
     """Scrape https://www.fantokens.com/fr/trade/<slug>.
-    Retourne {"price_usd": float, "change_24h": float|None, "name": str}
-    ou None si le slug n'existe pas (page 404) ou si le prix n'a pas pu
-    être trouvé dans la page."""
+    Retourne {"price_usd": float, "change_24h": float|None, "name": str,
+    "logo": str|None} ou None si le slug n'existe pas (page 404) ou si le
+    prix n'a pas pu être trouvé dans la page.
+
+    Le logo est extrait de la MÊME page (pas de requête en plus) via
+    plusieurs stratégies, dans l'ordre :
+    1. balise <meta property="og:image"> (image de partage, en général le
+       logo/icône du token) — la plus fiable si présente.
+    2. la première <img> qui suit le <h1> du titre dans le HTML (logo
+       affiché à côté du nom sur la page).
+    3. la première <img> dont l'alt contient le nom du club ou le mot
+       "logo"/"token".
+    À adapter si la structure réelle de fantokens.com diverge (cf. tests
+    à faire une fois en prod, cf. onglet Correspondances -> Vérifier)."""
     url = FANTOKENS_TRADE_URL.format(slug=slug)
     r = _get_with_retry(url, timeout=timeout)
     if r is None:
@@ -145,7 +156,38 @@ def fetch_fantoken_page(slug: str, timeout: int = 15):
     title_tag = soup.find("h1")
     name = title_tag.get_text(strip=True) if title_tag else slug
 
-    return {"price_usd": price_usd, "change_24h": change_24h, "name": name}
+    logo = _extract_logo(soup, title_tag, name)
+
+    return {"price_usd": price_usd, "change_24h": change_24h, "name": name, "logo": logo}
+
+
+def _extract_logo(soup: BeautifulSoup, title_tag, name: str) -> str | None:
+    """Best-effort : voir la docstring de fetch_fantoken_page pour l'ordre
+    des stratégies essayées."""
+    # 1. og:image (méta de partage réseaux sociaux, quasi toujours présente
+    # et pointe vers le logo/icône du token sur ce type de site).
+    og_image = soup.find("meta", attrs={"property": "og:image"})
+    if og_image and og_image.get("content"):
+        return og_image["content"]
+
+    # 2. Première image après le <h1> (logo affiché à côté du titre).
+    if title_tag:
+        img = title_tag.find_next("img")
+        if img and (img.get("src") or img.get("data-src")):
+            return img.get("src") or img.get("data-src")
+
+    # 3. Image dont l'alt correspond au nom du club/token.
+    name_lower = name.lower()
+    for img in soup.find_all("img"):
+        alt = (img.get("alt") or "").strip().lower()
+        if not alt:
+            continue
+        if alt in name_lower or name_lower in alt or "logo" in alt or "token" in alt:
+            src = img.get("src") or img.get("data-src")
+            if src:
+                return src
+
+    return None
 
 
 def fetch_usd_to_eur_rate(timeout: int = 10) -> float:
