@@ -274,8 +274,18 @@ def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
         # devise actuellement sélectionnée (sinon on redemande la saisie).
         manual = manual_prices.get(club)
         row["needs_currency_reentry"] = False
+        auto_price_available = row["matched"]  # avant override manuel, cf. ci-dessus
         if manual is not None and manual.get("price") is not None:
-            if manual.get("currency") == vs_currency:
+            # Un prix "de secours" (tapé faute de prix auto) doit céder la
+            # place dès qu'un prix automatique redevient disponible pour ce
+            # club — sinon il resterait affiché pour toujours même après
+            # correction du slug (cf. bug : compteur "prix manuels" qui ne
+            # redescend jamais). Une correction volontaire (is_fallback=False)
+            # reste prioritaire quoi qu'il arrive.
+            stale_fallback = manual.get("is_fallback") and auto_price_available
+            if stale_fallback:
+                row["is_manual"] = False
+            elif manual.get("currency") == vs_currency:
                 row["is_manual"] = True
                 row["matched"] = True
                 row["price"] = manual["price"]
@@ -408,7 +418,7 @@ with tab_dashboard:
                 submitted = c4.form_submit_button(btn_label, use_container_width=True)
                 if submitted:
                     if price_val > 0:
-                        storage.save_manual_price(row["name"], price_val, devise)
+                        storage.save_manual_price(row["name"], price_val, devise, is_fallback=True)
                         storage.save_no_token_flag(row["name"], True)
                         st.rerun()
                     else:
