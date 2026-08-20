@@ -438,10 +438,6 @@ with tab_dashboard:
     input_rows["Dernière saisie"] = input_rows["_days"].apply(
         lambda d: "Jamais" if d >= 99999 else ("Aujourd'hui" if d == 0 else f"Il y a {d} j")
     )
-    input_rows["Lien"] = input_rows["name"].map(club_links).fillna("")
-    # Ordre alphabétique fixe (le tri par ancienneté changeait l'ordre de façon
-    # déroutante d'une saisie à l'autre) — la colonne "Dernière saisie" suffit
-    # pour repérer visuellement ceux à mettre à jour en premier.
     input_rows = input_rows.sort_values("name").drop(columns=["_days"])
     input_rows["points_par_jour"] = None
 
@@ -460,14 +456,23 @@ with tab_dashboard:
                 "Prix": st.column_config.NumberColumn(disabled=True, format="%.5f"),
                 "Nb tokens": st.column_config.NumberColumn(disabled=True),
                 "Dernière saisie": st.column_config.TextColumn(disabled=True),
-                "Lien": st.column_config.LinkColumn("Socios", display_text="🔗", width="small"),
                 "points_par_jour": st.column_config.NumberColumn("Points / jour", min_value=0.0, step=0.1),
             },
-            column_order=["Club", "Dernière saisie", "Prix", "Nb tokens", "points_par_jour", "Lien"],
+            column_order=["Club", "Dernière saisie", "Prix", "Nb tokens", "points_par_jour"],
             hide_index=True,
             use_container_width=True,
             key="input_table",
         )
+
+        if club_links:
+            with st.expander(f"🔗 Accès rapide aux pages Socios ({len(club_links)} club(s) avec un lien enregistré)"):
+                cols_per_row = 3
+                items = sorted(club_links.items())
+                for i in range(0, len(items), cols_per_row):
+                    row_cols = st.columns(cols_per_row)
+                    for (club, url), col in zip(items[i:i + cols_per_row], row_cols):
+                        if url:
+                            col.link_button(f"🔗 {club}", url, use_container_width=True)
 
         if st.button("💾 Enregistrer les saisies", type="primary"):
             to_save = [
