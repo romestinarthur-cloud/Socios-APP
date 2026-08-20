@@ -4,7 +4,8 @@ from datetime import datetime
 
 import storage
 from teams_scraper import get_teams
-from prices import guess_slug, fetch_all_prices, fetch_fantoken_page
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from prices import guess_slug, fetch_usd_to_eur_rate, fetch_fantoken_page
 
 SOCIOS_LOGO_URL = "https://logowik.com/content/uploads/images/socioscom4620.jpg"
 
@@ -170,13 +171,52 @@ def load_teams():
     return teams, live_ok
 
 
-@st.cache_data(ttl=900, show_spinner="Récupération des prix sur fantokens.com...")
-def load_prices(club_slugs_items: tuple, vs_currency: str):
-    """club_slugs_items : tuple de (club, slug) triée (pour être hashable et
-    servir de clé de cache). Une requête HTTP par club (fantokens.com n'a pas
-    d'endpoint groupé), donc ça peut prendre quelques dizaines de secondes la
-    première fois — mis en cache 15 min ensuite."""
-    return fetch_all_prices(dict(club_slugs_items), vs_currency=vs_currency)
+@st.cache_data(ttl=900, show_spinner=False)
+def load_fx_rate(vs_currency: str) -> float:
+    """Taux de change, mis en cache à part (change rarement, pas la peine
+    de le redemander à chaque club)."""
+    return fetch_usd_to_eur_rate() if vs_currency == "eur" else 1.0
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_single_price(club: str, slug: str, vs_currency: str, fx_rate: float):
+    """Cache PAR CLUB (clé = club + slug + devise), pas un seul gros cache
+    global. Résultat : vérifier/changer le slug d'UN club, ou cocher/décocher
+    "aucun token", n'a plus d'effet sur le cache des autres clubs — seul le
+    club concerné est (re)fetché, tous les autres restent servis depuis le
+    cache existant, instantanément."""
+    page = fetch_fantoken_page(slug)
+    if not page:
+        return None
+    price = page["price_usd"] * fx_rate if vs_currency == "eur" else page["price_usd"]
+    return {"price": price, "change_24h": page["change_24h"]}
+
+
+def load_prices(club_slugs: dict, vs_currency: str) -> dict:
+    """Récupère le prix de chaque club via load_single_price (caché
+    individuellement), en parallèle pour les clubs qui ne sont pas déjà en
+    cache — donc un "Rafraîchir" complet reste rapide (parallélisé), et un
+    clic isolé (Vérifier / aucun token / lien) ne retouche que le club
+    concerné."""
+    fx_rate = load_fx_rate(vs_currency)
+    items = [(club, slug) for club, slug in club_slugs.items() if slug]
+    if not items:
+        return {}
+    results = {}
+    with ThreadPoolExecutor(max_workers=min(12, len(items))) as executor:
+        future_to_club = {
+            executor.submit(load_single_price, club, slug, vs_currency, fx_rate): club
+            for club, slug in items
+        }
+        for future in as_completed(future_to_club):
+            club = future_to_club[future]
+            try:
+                res = future.result()
+            except Exception:
+                continue
+            if res:
+                results[club] = res
+    return results
 
 
 def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
@@ -186,16 +226,18 @@ def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
     no_token_flags = storage.get_no_token_flags()
     manual_prices = storage.get_manual_prices()  # club -> {"price":..., "currency":...}
 
-    # Slug à interroger pour chaque club (sauf ceux marqués "aucun token").
+    # Slug à interroger pour chaque club — y compris ceux marqués "aucun
+    # token" : on les filtre plus bas (ligne "if club in no_token_flags"),
+    # PAS ici. Les exclure ici changerait la clé de cache de load_prices
+    # à chaque coche/décoche de la case "aucun token", et forcerait un
+    # re-fetch complet de tous les autres clubs pour rien.
     club_slugs = {}
     for team in teams:
         club = team["name"]
-        if club in no_token_flags:
-            continue
         club_slugs[club] = saved_mappings.get(club) or guess_slug(club)
 
     try:
-        price_data = load_prices(tuple(sorted(club_slugs.items())), vs_currency)
+        price_data = load_prices(club_slugs, vs_currency)
         prices_ok = True
     except Exception as e:
         price_data = {}
@@ -260,7 +302,8 @@ devise = st.sidebar.selectbox("Devise", ["eur", "usd"], index=0)
 
 if st.sidebar.button("🔄 Rafraîchir clubs & prix"):
     load_teams.clear()
-    load_prices.clear()
+    load_fx_rate.clear()
+    load_single_price.clear()
     st.rerun()
 
 df = build_dataframe(capital, devise)
