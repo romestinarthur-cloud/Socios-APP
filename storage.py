@@ -76,6 +76,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS {MANUAL_PRICE_TABLE} (
             club TEXT PRIMARY KEY,
             price REAL,
+            currency TEXT
             currency TEXT,
             is_fallback BOOLEAN NOT NULL DEFAULT FALSE
         )
@@ -220,9 +221,11 @@ def delete_entry(entry_id: int):
     cur.close()
 
 
+def save_manual_price(club: str, price: float | None, currency: str | None = None):
 def save_manual_price(club: str, price: float | None, currency: str | None = None, is_fallback: bool = False):
     """Enregistre un prix saisi à la main pour un club, avec la devise dans laquelle
     il a été tapé (essentiel : un prix EUR affiché tel quel après passage en USD
+    serait faux). Passer price=None supprime la saisie manuelle."""
     serait faux). Passer price=None supprime la saisie manuelle.
 
     is_fallback distingue deux usages très différents du même mécanisme :
@@ -241,6 +244,9 @@ def save_manual_price(club: str, price: float | None, currency: str | None = Non
         cur.execute(f"DELETE FROM {MANUAL_PRICE_TABLE} WHERE club = %s", (club,))
     else:
         cur.execute(
+            f"""INSERT INTO {MANUAL_PRICE_TABLE} (club, price, currency) VALUES (%s, %s, %s)
+                ON CONFLICT (club) DO UPDATE SET price = EXCLUDED.price, currency = EXCLUDED.currency""",
+            (club, price, currency),
             f"""INSERT INTO {MANUAL_PRICE_TABLE} (club, price, currency, is_fallback) VALUES (%s, %s, %s, %s)
                 ON CONFLICT (club) DO UPDATE SET price = EXCLUDED.price, currency = EXCLUDED.currency,
                     is_fallback = EXCLUDED.is_fallback""",
@@ -251,12 +257,15 @@ def save_manual_price(club: str, price: float | None, currency: str | None = Non
 
 
 def get_manual_prices() -> dict:
+    """dict club -> {"price": float, "currency": str|None}."""
     """dict club -> {"price": float, "currency": str|None, "is_fallback": bool}."""
     conn = get_conn()
     cur = conn.cursor()
+    cur.execute(f"SELECT club, price, currency FROM {MANUAL_PRICE_TABLE}")
     cur.execute(f"SELECT club, price, currency, is_fallback FROM {MANUAL_PRICE_TABLE}")
     rows = cur.fetchall()
     cur.close()
+    return {r[0]: {"price": r[1], "currency": r[2]} for r in rows}
     return {r[0]: {"price": r[1], "currency": r[2], "is_fallback": r[3]} for r in rows}
 
 
@@ -383,51 +392,6 @@ def get_extra_clubs() -> dict:
     rows = cur.fetchall()
     cur.close()
     return {r[0]: r[1] for r in rows}
-
-
-def confirm_verification(club: str, slug: str, logo: str | None):
-    """Enregistre tout ce que confirme un "Vérifier" réussi (onglet
-    Correspondances) en UNE SEULE transaction/commit au lieu de 3-4 allers-
-    retours réseau séparés (save_mapping + save_no_token_flag +
-    save_manual_price(None) + save_extra_club) : mapping club -> slug, levée
-    du flag "aucun token", suppression d'un éventuel prix de secours saisi à
-    la main, et logo trouvé sur fantokens.com s'il y en a un."""
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        f"""INSERT INTO {MAPPING_TABLE} (club, token_id) VALUES (%s, %s)
-            ON CONFLICT (club) DO UPDATE SET token_id = EXCLUDED.token_id""",
-        (club, slug),
-    )
-    cur.execute(f"DELETE FROM {NO_TOKEN_TABLE} WHERE club = %s", (club,))
-    cur.execute(f"DELETE FROM {MANUAL_PRICE_TABLE} WHERE club = %s", (club,))
-    if logo:
-        cur.execute(
-            f"""INSERT INTO {EXTRA_CLUBS_TABLE} (club, logo) VALUES (%s, %s)
-                ON CONFLICT (club) DO UPDATE SET logo = EXCLUDED.logo""",
-            (club, logo),
-        )
-    conn.commit()
-    cur.close()
-
-
-def add_manual_club(name: str, slug: str, logo: str):
-    """Ajoute un club manqué par le scraping + son mapping de slug, en une
-    seule transaction (un seul commit) au lieu de deux appels séparés."""
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        f"""INSERT INTO {EXTRA_CLUBS_TABLE} (club, logo) VALUES (%s, %s)
-            ON CONFLICT (club) DO UPDATE SET logo = EXCLUDED.logo""",
-        (name, logo),
-    )
-    cur.execute(
-        f"""INSERT INTO {MAPPING_TABLE} (club, token_id) VALUES (%s, %s)
-            ON CONFLICT (club) DO UPDATE SET token_id = EXCLUDED.token_id""",
-        (name, slug),
-    )
-    conn.commit()
-    cur.close()
 
 
 def delete_extra_club(club: str):
