@@ -22,6 +22,7 @@ MANUAL_PRICE_TABLE = "manual_prices"
 NO_TOKEN_TABLE = "no_token_flags"
 RANK_SNAPSHOT_TABLE = "rank_snapshot"
 CLUB_LINKS_TABLE = "club_links"
+EXTRA_CLUBS_TABLE = "extra_clubs"
 
 
 @st.cache_resource(show_spinner=False)
@@ -100,6 +101,14 @@ def init_db():
         CREATE TABLE IF NOT EXISTS {CLUB_LINKS_TABLE} (
             club TEXT PRIMARY KEY,
             url TEXT
+        )
+        """
+    )
+    cur.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {EXTRA_CLUBS_TABLE} (
+            club TEXT PRIMARY KEY,
+            logo TEXT NOT NULL
         )
         """
     )
@@ -332,3 +341,35 @@ def get_club_links() -> dict:
     rows = cur.fetchall()
     cur.close()
     return {r[0]: r[1] for r in rows}
+
+
+def save_extra_club(club: str, logo: str):
+    """Ajoute un club manqué par le scraping de socios.com, saisi à la main
+    (nom + logo) depuis l'onglet Correspondances."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        f"""INSERT INTO {EXTRA_CLUBS_TABLE} (club, logo) VALUES (%s, %s)
+            ON CONFLICT (club) DO UPDATE SET logo = EXCLUDED.logo""",
+        (club, logo),
+    )
+    conn.commit()
+    cur.close()
+
+
+def get_extra_clubs() -> dict:
+    """dict club -> logo, pour les clubs ajoutés à la main."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(f"SELECT club, logo FROM {EXTRA_CLUBS_TABLE}")
+    rows = cur.fetchall()
+    cur.close()
+    return {r[0]: r[1] for r in rows}
+
+
+def delete_extra_club(club: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(f"DELETE FROM {EXTRA_CLUBS_TABLE} WHERE club = %s", (club,))
+    conn.commit()
+    cur.close()
