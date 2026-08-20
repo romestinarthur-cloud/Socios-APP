@@ -438,7 +438,7 @@ with tab_dashboard:
     input_rows["Dernière saisie"] = input_rows["_days"].apply(
         lambda d: "Jamais" if d >= 99999 else ("Aujourd'hui" if d == 0 else f"Il y a {d} j")
     )
-    input_rows["Lien"] = input_rows["name"].map(club_links)
+    input_rows["Lien"] = input_rows["name"].map(club_links).fillna("")
     # Ordre alphabétique fixe (le tri par ancienneté changeait l'ordre de façon
     # déroutante d'une saisie à l'autre) — la colonne "Dernière saisie" suffit
     # pour repérer visuellement ceux à mettre à jour en premier.
