@@ -385,6 +385,51 @@ def get_extra_clubs() -> dict:
     return {r[0]: r[1] for r in rows}
 
 
+def confirm_verification(club: str, slug: str, logo: str | None):
+    """Enregistre tout ce que confirme un "Vérifier" réussi (onglet
+    Correspondances) en UNE SEULE transaction/commit au lieu de 3-4 allers-
+    retours réseau séparés (save_mapping + save_no_token_flag +
+    save_manual_price(None) + save_extra_club) : mapping club -> slug, levée
+    du flag "aucun token", suppression d'un éventuel prix de secours saisi à
+    la main, et logo trouvé sur fantokens.com s'il y en a un."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        f"""INSERT INTO {MAPPING_TABLE} (club, token_id) VALUES (%s, %s)
+            ON CONFLICT (club) DO UPDATE SET token_id = EXCLUDED.token_id""",
+        (club, slug),
+    )
+    cur.execute(f"DELETE FROM {NO_TOKEN_TABLE} WHERE club = %s", (club,))
+    cur.execute(f"DELETE FROM {MANUAL_PRICE_TABLE} WHERE club = %s", (club,))
+    if logo:
+        cur.execute(
+            f"""INSERT INTO {EXTRA_CLUBS_TABLE} (club, logo) VALUES (%s, %s)
+                ON CONFLICT (club) DO UPDATE SET logo = EXCLUDED.logo""",
+            (club, logo),
+        )
+    conn.commit()
+    cur.close()
+
+
+def add_manual_club(name: str, slug: str, logo: str):
+    """Ajoute un club manqué par le scraping + son mapping de slug, en une
+    seule transaction (un seul commit) au lieu de deux appels séparés."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        f"""INSERT INTO {EXTRA_CLUBS_TABLE} (club, logo) VALUES (%s, %s)
+            ON CONFLICT (club) DO UPDATE SET logo = EXCLUDED.logo""",
+        (name, logo),
+    )
+    cur.execute(
+        f"""INSERT INTO {MAPPING_TABLE} (club, token_id) VALUES (%s, %s)
+            ON CONFLICT (club) DO UPDATE SET token_id = EXCLUDED.token_id""",
+        (name, slug),
+    )
+    conn.commit()
+    cur.close()
+
+
 def delete_extra_club(club: str):
     conn = get_conn()
     cur = conn.cursor()
