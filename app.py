@@ -849,3 +849,4 @@ with tab_history:
                 if c5.button("🗑️", key=f"del_{r['id']}"):
                     storage.delete_entry(r["id"])
                     st.rerun()
+                
