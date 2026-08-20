@@ -69,6 +69,7 @@ st.markdown(
         color: #ffffff !important;
     }
     .stButton > button p { color: #f5f6fa !important; }
+
     /* Bouton de soumission d'un st.form (utilisé dans la zone de saisie
        manuelle) : classe CSS différente de .stButton, sinon texte invisible. */
     .stFormSubmitButton > button {
@@ -81,6 +82,7 @@ st.markdown(
         border-color: #ff4fc3 !important;
     }
     .stFormSubmitButton > button p { color: #f5f6fa !important; }
+
     /* st.form ajoute par défaut une marge/bordure qui décale son contenu par
        rapport aux autres lignes — on l'enlève pour garder l'alignement. */
     div[data-testid="stForm"] {
@@ -88,11 +90,14 @@ st.markdown(
         padding: 0 !important;
         margin: 0 !important;
     }
+
     /* Texte affiché (valeur sélectionnée) dans les selectbox — sinon reste
        invisible même quand le menu déroulant lui-même est bien stylé. */
     div[data-baseweb="select"] * { color: #f5f6fa !important; }
+
     /* Checkbox */
     .stCheckbox label p { color: #f5f6fa !important; }
+
     /* data_editor / dataframe cellules */
     div[data-testid="stDataFrame"], div[data-testid="stDataEditor"] {
         border-radius: 10px; overflow: hidden;
@@ -100,6 +105,7 @@ st.markdown(
     div[data-testid="stDataFrame"] *, div[data-testid="stDataEditor"] * {
         color: #0f1117 !important;
     }
+
     .socios-hero {
         background: linear-gradient(135deg, #7b2ff7 0%, #f107a3 100%);
         padding: 1.4rem 1.8rem; border-radius: 14px; margin-bottom: 1.2rem;
@@ -126,6 +132,7 @@ st.markdown(
     }
     .manual-zone h4, .manual-zone p, .manual-zone .stCaption { color: #ffe4b8 !important; }
     div[data-testid="stCaptionContainer"], .stCaption { color: #c7cbdb !important; }
+
     /* Empêche l'assombrissement/le fondu que Streamlit applique automatiquement
        au contenu pendant qu'un rechargement (rerun) est en cours. Streamlit
        marque les blocs "obsolètes" avec l'attribut data-stale="true" et réduit
@@ -151,13 +158,30 @@ st.markdown(
 # ---------------------------------------------------------------------------
 # Chargement des données (cache 1h pour ne pas spammer socios.com / CoinGecko)
 # ---------------------------------------------------------------------------
+
 @st.cache_data(ttl=3600, show_spinner="Récupération des clubs sur socios.com...")
+def _fetch_teams_cached():
+    """Scraping en direct de socios.com : la partie VRAIMENT coûteuse (requête
+    réseau + parsing HTML), mise en cache 1h. Uniquement invalidée par le
+    bouton "🔄 Rafraîchir clubs & prix" — surtout PAS par "Vérifier" ou
+    "Ajouter un club", qui ne touchent que la table extra_clubs (fusionnée
+    par load_teams ci-dessous à chaque appel, sans passer par ce cache)."""
+    return get_teams()
+
+
 def load_teams():
-    teams, live_ok = get_teams()
-    # extra : clubs ajoutés à la main (manqués par le scraping socios.com) OU
-    # logos récupérés depuis fantokens.com au moment du "Vérifier" — table
-    # réutilisée pour les deux cas : elle sert de SURCOUCHE de logo, qu'un
-    # club vienne du scraping ou non.
+    """Fusionne les clubs scrapés (cache 1h, cf. _fetch_teams_cached) avec les
+    clubs/logos ajoutés à la main (table extra_clubs, relue à chaque appel —
+    peu coûteux, une seule petite requête DB, pas besoin de cache).
+    Avant, toute cette fusion était DANS la fonction mise en cache : corriger
+    un slug ("Vérifier") ou ajouter un club obligeait à vider le cache en
+    entier pour que le nouveau logo apparaisse, ce qui déclenchait un
+    RE-SCRAPING COMPLET de socios.com (plusieurs secondes) à chaque clic.
+    En sortant la fusion du cache, "Vérifier"/"Ajouter" prennent effet
+    immédiatement sans jamais retoucher au scraping."""
+    teams, live_ok = _fetch_teams_cached()
+    # Copie : ne pas modifier en place la liste renvoyée par le cache.
+    teams = [dict(t) for t in teams]
     extra = storage.get_extra_clubs()
     if extra:
         existing_names = {t["name"] for t in teams}
@@ -223,6 +247,7 @@ def load_prices(club_slugs: dict, vs_currency: str) -> dict:
 
 def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
     teams, live_ok = load_teams()
+
     saved_mappings = storage.get_saved_mappings()  # club -> slug fantokens.com (corrigé à la main)
     no_token_flags = storage.get_no_token_flags()
     manual_prices = storage.get_manual_prices()  # club -> {"price":..., "currency":...}
@@ -250,6 +275,7 @@ def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
     for team in teams:
         club = team["name"]
         row = dict(team)
+
         if club in no_token_flags:
             row.update(matched=False, price=None, price_change_24h=None)
         else:
@@ -296,7 +322,6 @@ def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
     )
     # Toujours trié par ordre alphabétique, y compris les clubs saisis à la main.
     df = df.sort_values(by="name", ascending=True).reset_index(drop=True)
-
     st.session_state["_live_ok"] = live_ok
     st.session_state["_no_token_flags"] = no_token_flags
     return df
@@ -305,13 +330,14 @@ def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
+
 st.sidebar.markdown(f'<img src="{SOCIOS_LOGO_URL}" class="sidebar-logo" />', unsafe_allow_html=True)
 st.sidebar.title("⚙️ Paramètres")
 capital = st.sidebar.number_input("Capital de référence (€)", min_value=1.0, value=100.0, step=10.0)
 devise = st.sidebar.selectbox("Devise", ["eur", "usd"], index=0)
 
 if st.sidebar.button("🔄 Rafraîchir clubs & prix"):
-    load_teams.clear()
+    _fetch_teams_cached.clear()
     load_fx_rate.clear()
     load_single_price.clear()
     st.rerun()
@@ -374,9 +400,9 @@ tab_dashboard, tab_mapping, tab_ranking, tab_history = st.tabs(
 # ---------------------------------------------------------------------------
 # Tab 1 : saisie
 # ---------------------------------------------------------------------------
+
 with tab_dashboard:
     no_token_flags = st.session_state.get("_no_token_flags", set())
-
     # Un club reste dans cette zone de saisie tant qu'il est marqué "aucun token
     # trouvé" (même après avoir déjà un prix), tant que sa devise saisie ne
     # correspond plus à la devise active, ou tant qu'il n'a toujours aucun prix
@@ -553,6 +579,7 @@ with tab_dashboard:
 # ---------------------------------------------------------------------------
 # Tab 2 : correspondances / corrections manuelles
 # ---------------------------------------------------------------------------
+
 with tab_mapping:
     st.subheader("Vérifier / corriger les correspondances club → fantokens.com")
     st.caption(
@@ -564,7 +591,6 @@ with tab_mapping:
         "ça correspond bien. Coche « aucun token » si le club n'a vraiment aucun "
         "Fan Token (le prix reste alors saisi à la main dans l'onglet Saisie)."
     )
-
     saved_mappings = storage.get_saved_mappings()
     no_token_flags = storage.get_no_token_flags()
     club_links = storage.get_club_links()
@@ -591,22 +617,19 @@ with tab_mapping:
             except Exception as e:
                 st.toast(f"Erreur réseau : {e}", icon="⚠️")
                 found = None
-
             if found:
-                storage.save_mapping(club, new_slug)
-                storage.save_no_token_flag(club, False)
-                # Nettoie l'éventuel prix saisi à la main entre-temps (le
-                # temps que le slug soit cassé) : maintenant qu'un prix
+                # Une seule transaction (un seul aller-retour réseau vers la
+                # base) au lieu de 3-4 commits séparés : enregistre le slug,
+                # lève le flag "aucun token", nettoie l'éventuel prix de
+                # secours saisi à la main entre-temps (maintenant qu'un prix
                 # automatique est retrouvé, il doit reprendre la main, sinon
-                # l'ancien prix manuel continue de tout écraser pour
-                # toujours et le compteur "Prix manuels" ne redescend jamais.
-                storage.save_manual_price(club, None)
-                if found.get("logo"):
-                    # Le logo trouvé sur fantokens.com écrase celui de
-                    # socios.com/seed (cf. load_teams) — plus besoin de le
-                    # chercher/coller à la main.
-                    storage.save_extra_club(club, found["logo"])
-                load_teams.clear()
+                # l'ancien prix manuel continue de tout écraser pour toujours
+                # et le compteur "Prix manuels" ne redescend jamais), et
+                # enregistre le logo trouvé sur fantokens.com s'il y en a un.
+                # Pas besoin de load_teams.clear() : load_teams relit
+                # extra_clubs à chaque appel, le nouveau logo apparaît donc
+                # dès le prochain rerun sans re-scraper socios.com.
+                storage.confirm_verification(club, new_slug, found.get("logo"))
                 st.toast(f'Trouvé : {found["name"]} — ${found["price_usd"]:.5f}. Enregistré.', icon="✅")
                 st.rerun()
             else:
@@ -627,6 +650,14 @@ with tab_mapping:
             if st.button("Enregistrer le lien", key=f"link_save_{club}"):
                 storage.save_club_link(club, new_link.strip() or None)
                 st.toast(f"Lien enregistré pour {club}." if new_link.strip() else f"Lien retiré pour {club}.", icon="🔗")
+                # Sans ce rerun, le nouveau lien restait invisible dans
+                # l'onglet Saisie (bouton "🔗 Ouvrir") : ce bouton est construit
+                # avec club_links, qui est lu une seule fois tout en haut du
+                # script — AVANT que ce clic n'ait lieu. Il fallait donc
+                # attendre une autre action ailleurs pour que le lien
+                # apparaisse. C'est le même schéma que "Vérifier" /
+                # "Aucun token" juste au-dessus : on force le rerun ici aussi.
+                st.rerun()
 
     st.divider()
     st.markdown("#### ➕ Ajouter un club manquant")
@@ -660,7 +691,6 @@ with tab_mapping:
                 except Exception as e:
                     found = None
                     st.error(f"Erreur réseau en vérifiant le slug : {e}")
-
                 if found is None:
                     st.error(
                         f"Aucune page fantokens.com/fr/trade/{slug} trouvée — vérifie le slug "
@@ -668,9 +698,11 @@ with tab_mapping:
                     )
                 else:
                     logo = found.get("logo")
-                    storage.save_extra_club(name, logo or SOCIOS_LOGO_URL)
-                    storage.save_mapping(name, slug)
-                    load_teams.clear()
+                    # Une seule transaction pour les deux écritures. Pas de
+                    # load_teams.clear() : load_teams relit extra_clubs à
+                    # chaque appel, le club apparaît dès le prochain rerun
+                    # sans re-scraper socios.com.
+                    storage.add_manual_club(name, slug, logo or SOCIOS_LOGO_URL)
                     if logo:
                         st.success(f"« {name} » ajouté avec son logo et son prix ({slug}).")
                     else:
@@ -694,16 +726,16 @@ with tab_mapping:
 # ---------------------------------------------------------------------------
 # Tab 3 : classement
 # ---------------------------------------------------------------------------
+
 with tab_ranking:
     st.subheader("Classement des clubs les plus rentables")
-
     latest = storage.get_latest_entry_per_club()
+
     if not latest:
         st.info("Aucune saisie pour l'instant — va dans l'onglet **Saisie** pour commencer.")
     else:
         price_by_club = dict(zip(df["name"], df["price"]))
         logo_by_club = dict(zip(df["name"], df["logo"]))
-
         rows = []
         for club, entry in latest.items():
             current_price = price_by_club.get(club)
@@ -721,7 +753,6 @@ with tab_ranking:
                     f"Points/jour pour {capital:.0f}{devise.upper()} (actualisé)": round(rendement_now, 3),
                 }
             )
-
         if rows:
             rank_col = "Points/jour saisis"  # classement basé sur ce que tu as toi-même saisi
             rank_df = pd.DataFrame(rows).sort_values(rank_col, ascending=False)
@@ -799,9 +830,9 @@ with tab_ranking:
 # ---------------------------------------------------------------------------
 # Tab 4 : évolution dans le temps
 # ---------------------------------------------------------------------------
+
 with tab_history:
     st.subheader("Évolution du rendement dans le temps")
-
     all_entries = storage.get_all_entries()
     if not all_entries:
         st.info("Aucun historique pour l'instant.")
@@ -831,7 +862,6 @@ with tab_history:
                 st.info("Sélectionne au moins un club pour afficher le graphique.")
 
         _evolution_fragment()
-
         with st.expander("Voir toutes les saisies (modifier ou supprimer une entrée)"):
             st.caption("Tu peux corriger une valeur erronée directement dans les cases ci-dessous, puis Enregistrer.")
             hist_edit_df = pd.DataFrame([dict(r) for r in all_entries])[
