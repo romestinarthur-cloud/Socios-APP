@@ -132,7 +132,13 @@ st.markdown(
     div[data-testid="stCaptionContainer"], .stCaption { color: #c7cbdb !important; }
 
     /* Empêche l'assombrissement/le fondu que Streamlit applique automatiquement
-       au contenu pendant qu'un rechargement (rerun) est en cours. */
+       au contenu pendant qu'un rechargement (rerun) est en cours. Streamlit
+       marque les blocs "obsolètes" avec l'attribut data-stale="true" et réduit
+       leur opacité via le thème par défaut — on neutralise précisément ça. */
+    [data-stale="true"] {
+        opacity: 1 !important;
+        transition: none !important;
+    }
     [data-testid="stAppViewContainer"],
     [data-testid="stMain"],
     [data-testid="stMainBlockContainer"],
