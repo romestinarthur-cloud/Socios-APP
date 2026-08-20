@@ -23,6 +23,7 @@ mécanisme que l'ancien mapping vers un id CoinGecko, réutilisé tel quel).
 import re
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from bs4 import BeautifulSoup
