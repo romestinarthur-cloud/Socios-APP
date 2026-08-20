@@ -76,9 +76,15 @@ def init_db():
         CREATE TABLE IF NOT EXISTS {MANUAL_PRICE_TABLE} (
             club TEXT PRIMARY KEY,
             price REAL,
-            currency TEXT
+            currency TEXT,
+            is_fallback BOOLEAN NOT NULL DEFAULT FALSE
         )
         """
+    )
+    # Ajoute la colonne si la table existait déjà avant cette version
+    # (bases existantes créées avant l'ajout de is_fallback).
+    cur.execute(
+        f"ALTER TABLE {MANUAL_PRICE_TABLE} ADD COLUMN IF NOT EXISTS is_fallback BOOLEAN NOT NULL DEFAULT FALSE"
     )
     cur.execute(
         f"""
@@ -214,32 +220,44 @@ def delete_entry(entry_id: int):
     cur.close()
 
 
-def save_manual_price(club: str, price: float | None, currency: str | None = None):
+def save_manual_price(club: str, price: float | None, currency: str | None = None, is_fallback: bool = False):
     """Enregistre un prix saisi à la main pour un club, avec la devise dans laquelle
     il a été tapé (essentiel : un prix EUR affiché tel quel après passage en USD
-    serait faux). Passer price=None supprime la saisie manuelle."""
+    serait faux). Passer price=None supprime la saisie manuelle.
+
+    is_fallback distingue deux usages très différents du même mécanisme :
+    - is_fallback=True  : prix de secours tapé parce qu'aucun prix automatique
+      n'était disponible (zone "clubs sans prix"). Doit céder la place dès
+      qu'un prix automatique redevient disponible pour ce club (cf.
+      build_dataframe dans app.py) — sinon il resterait affiché pour
+      toujours même une fois le vrai prix retrouvé.
+    - is_fallback=False (défaut) : correction volontaire d'un prix automatique
+      que l'utilisateur sait faux (bouton "Enregistrer prix corrigés").
+      Doit rester prioritaire indéfiniment, l'utilisateur a fait ce choix
+      en connaissance de cause."""
     conn = get_conn()
     cur = conn.cursor()
     if price is None:
         cur.execute(f"DELETE FROM {MANUAL_PRICE_TABLE} WHERE club = %s", (club,))
     else:
         cur.execute(
-            f"""INSERT INTO {MANUAL_PRICE_TABLE} (club, price, currency) VALUES (%s, %s, %s)
-                ON CONFLICT (club) DO UPDATE SET price = EXCLUDED.price, currency = EXCLUDED.currency""",
-            (club, price, currency),
+            f"""INSERT INTO {MANUAL_PRICE_TABLE} (club, price, currency, is_fallback) VALUES (%s, %s, %s, %s)
+                ON CONFLICT (club) DO UPDATE SET price = EXCLUDED.price, currency = EXCLUDED.currency,
+                    is_fallback = EXCLUDED.is_fallback""",
+            (club, price, currency, is_fallback),
         )
     conn.commit()
     cur.close()
 
 
 def get_manual_prices() -> dict:
-    """dict club -> {"price": float, "currency": str|None}."""
+    """dict club -> {"price": float, "currency": str|None, "is_fallback": bool}."""
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(f"SELECT club, price, currency FROM {MANUAL_PRICE_TABLE}")
+    cur.execute(f"SELECT club, price, currency, is_fallback FROM {MANUAL_PRICE_TABLE}")
     rows = cur.fetchall()
     cur.close()
-    return {r[0]: {"price": r[1], "currency": r[2]} for r in rows}
+    return {r[0]: {"price": r[1], "currency": r[2], "is_fallback": r[3]} for r in rows}
 
 
 def save_no_token_flag(club: str, flagged: bool):
