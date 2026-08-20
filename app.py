@@ -130,6 +130,18 @@ st.markdown(
     }
     .manual-zone h4, .manual-zone p, .manual-zone .stCaption { color: #ffe4b8 !important; }
     div[data-testid="stCaptionContainer"], .stCaption { color: #c7cbdb !important; }
+
+    /* Empêche l'assombrissement/le fondu que Streamlit applique automatiquement
+       au contenu pendant qu'un rechargement (rerun) est en cours. */
+    [data-testid="stAppViewContainer"],
+    [data-testid="stMain"],
+    [data-testid="stMainBlockContainer"],
+    .main .block-container,
+    .stApp {
+        opacity: 1 !important;
+        transition: none !important;
+        filter: none !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
