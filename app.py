@@ -4,8 +4,7 @@ from datetime import datetime
 
 import storage
 from teams_scraper import get_teams
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from prices import guess_slug, fetch_usd_to_eur_rate, fetch_fantoken_page
+from prices import fetch_all_candidate_tokens, match_teams_to_tokens
 
 SOCIOS_LOGO_URL = "https://logowik.com/content/uploads/images/socioscom4620.jpg"
 
@@ -160,144 +159,86 @@ st.markdown(
 
 @st.cache_data(ttl=3600, show_spinner="Récupération des clubs sur socios.com...")
 def load_teams():
-    teams, live_ok = get_teams()
-    # extra : clubs ajoutés à la main (manqués par le scraping socios.com) OU
-    # logos récupérés depuis fantokens.com au moment du "Vérifier" — table
-    # réutilisée pour les deux cas : elle sert de SURCOUCHE de logo, qu'un
-    # club vienne du scraping ou non.
-    extra = storage.get_extra_clubs()
-    if extra:
-        existing_names = {t["name"] for t in teams}
-        # Écrase le logo des clubs déjà présents (ex : logo mieux trouvé sur
-        # fantokens.com que sur socios.com) au lieu de les ignorer.
-        for t in teams:
-            if t["name"] in extra:
-                t["logo"] = extra[t["name"]]
-        teams = teams + [
-            {"name": name, "logo": logo} for name, logo in extra.items() if name not in existing_names
-        ]
-        teams = sorted(teams, key=lambda t: t["name"].lower())
-    return teams, live_ok
+    return get_teams()
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def load_fx_rate(vs_currency: str) -> float:
-    """Taux de change, mis en cache à part (change rarement, pas la peine
-    de le redemander à chaque club)."""
-    return fetch_usd_to_eur_rate() if vs_currency == "eur" else 1.0
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def load_single_price(club: str, slug: str, vs_currency: str, fx_rate: float):
-    """Cache PAR CLUB (clé = club + slug + devise), pas un seul gros cache
-    global. Résultat : vérifier/changer le slug d'UN club, ou cocher/décocher
-    "aucun token", n'a plus d'effet sur le cache des autres clubs — seul le
-    club concerné est (re)fetché, tous les autres restent servis depuis le
-    cache existant, instantanément."""
-    page = fetch_fantoken_page(slug)
-    if not page:
-        return None
-    price = page["price_usd"] * fx_rate if vs_currency == "eur" else page["price_usd"]
-    return {"price": price, "change_24h": page["change_24h"]}
-
-
-def load_prices(club_slugs: dict, vs_currency: str) -> dict:
-    """Récupère le prix de chaque club via load_single_price (caché
-    individuellement), en parallèle pour les clubs qui ne sont pas déjà en
-    cache — donc un "Rafraîchir" complet reste rapide (parallélisé), et un
-    clic isolé (Vérifier / aucun token / lien) ne retouche que le club
-    concerné."""
-    fx_rate = load_fx_rate(vs_currency)
-    items = [(club, slug) for club, slug in club_slugs.items() if slug]
-    if not items:
-        return {}
-    results = {}
-    with ThreadPoolExecutor(max_workers=min(12, len(items))) as executor:
-        future_to_club = {
-            executor.submit(load_single_price, club, slug, vs_currency, fx_rate): club
-            for club, slug in items
-        }
-        for future in as_completed(future_to_club):
-            club = future_to_club[future]
-            try:
-                res = future.result()
-            except Exception:
-                continue
-            if res:
-                results[club] = res
-    return results
+@st.cache_data(ttl=900, show_spinner="Récupération des prix sur CoinGecko...")
+def load_prices(vs_currency: str):
+    return fetch_all_candidate_tokens(vs_currency=vs_currency)
 
 
 def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
     teams, live_ok = load_teams()
-
-    saved_mappings = storage.get_saved_mappings()  # club -> slug fantokens.com (corrigé à la main)
-    no_token_flags = storage.get_no_token_flags()
-    manual_prices = storage.get_manual_prices()  # club -> {"price":..., "currency":...}
-
-    # Slug à interroger pour chaque club — y compris ceux marqués "aucun
-    # token" : on les filtre plus bas (ligne "if club in no_token_flags"),
-    # PAS ici. Les exclure ici changerait la clé de cache de load_prices
-    # à chaque coche/décoche de la case "aucun token", et forcerait un
-    # re-fetch complet de tous les autres clubs pour rien.
-    club_slugs = {}
-    for team in teams:
-        club = team["name"]
-        club_slugs[club] = saved_mappings.get(club) or guess_slug(club)
-
     try:
-        price_data = load_prices(club_slugs, vs_currency)
+        candidates = load_prices(vs_currency)
         prices_ok = True
     except Exception as e:
-        price_data = {}
+        candidates = []
         prices_ok = False
         st.session_state["_prices_error"] = str(e)
     st.session_state["_prices_ok"] = prices_ok
 
-    enriched = []
-    for team in teams:
-        club = team["name"]
-        row = dict(team)
+    saved_mappings = storage.get_saved_mappings()
+    no_token_flags = storage.get_no_token_flags()
+    manual_prices = storage.get_manual_prices()  # club -> {"price":..., "currency":...}
+
+    enriched = match_teams_to_tokens(teams, candidates)
+    cand_by_id = {c["id"]: c for c in candidates}
+
+    for row in enriched:
+        club = row["name"]
 
         if club in no_token_flags:
-            row.update(matched=False, price=None, price_change_24h=None)
+            # Marqué "aucun token trouvé" à la main : on ignore complètement le
+            # matching automatique et toute correspondance sauvegardée pour ce
+            # club, tant que ce drapeau n'est pas retiré dans l'onglet dédié.
+            row.update(
+                matched=False, match_score=None, token_id=None,
+                token_symbol=None, price=None, price_change_24h=None,
+            )
         else:
-            found = price_data.get(club)
-            if found:
-                row.update(matched=True, price=found["price"], price_change_24h=found["change_24h"])
-            else:
-                # Slug deviné/enregistré introuvable sur fantokens.com (404) ou
-                # échec réseau ponctuel pour ce club -> zone de saisie manuelle.
-                row.update(matched=False, price=None, price_change_24h=None)
+            override = saved_mappings.get(club)
+            if override and override in cand_by_id:
+                coin = cand_by_id[override]
+                row.update(
+                    matched=True,
+                    token_id=coin["id"],
+                    token_symbol=coin["symbol"].upper(),
+                    price=coin.get("current_price"),
+                    price_change_24h=coin.get("price_change_percentage_24h"),
+                )
+            # sinon : on garde le matching automatique déjà fait par match_teams_to_tokens
 
         # Prix saisi à la main : ne s'applique que si sa devise correspond à la
-        # devise actuellement sélectionnée (sinon on redemande la saisie).
+        # devise actuellement sélectionnée. Sinon un prix tapé en EUR serait
+        # affiché tel quel comme un prix USD (ou l'inverse) — donc on le
+        # neutralise et on demande une ressaisie plutôt que de l'utiliser.
         manual = manual_prices.get(club)
         row["needs_currency_reentry"] = False
-        auto_price_available = row["matched"]  # avant override manuel, cf. ci-dessus
         if manual is not None and manual.get("price") is not None:
-            # Un prix "de secours" (tapé faute de prix auto) doit céder la
-            # place dès qu'un prix automatique redevient disponible pour ce
-            # club — sinon il resterait affiché pour toujours même après
-            # correction du slug (cf. bug : compteur "prix manuels" qui ne
-            # redescend jamais). Une correction volontaire (is_fallback=False)
-            # reste prioritaire quoi qu'il arrive.
-            stale_fallback = manual.get("is_fallback") and auto_price_available
-            if stale_fallback:
-                row["is_manual"] = False
-            elif manual.get("currency") == vs_currency:
+            if manual.get("currency") == vs_currency:
                 row["is_manual"] = True
                 row["matched"] = True
+                row["match_score"] = None
                 row["price"] = manual["price"]
                 row["price_change_24h"] = None
+                if club in no_token_flags:
+                    # Pas de vrai token pour ce club : le prix manuel EST le token.
+                    row["token_id"] = None
+                    row["token_symbol"] = "manuel"
+                else:
+                    # Le token a bien été trouvé (auto ou correspondance choisie) :
+                    # on garde son id/symbole, on corrige juste le prix affiché.
+                    row["token_symbol"] = f'{row.get("token_symbol") or "?"} (corrigé)'
             else:
                 row["needs_currency_reentry"] = True
                 row["is_manual"] = False
-                row.update(matched=False, price=None, price_change_24h=None)
+                row.update(
+                    matched=False, token_id=None, token_symbol=None,
+                    price=None, price_change_24h=None,
+                )
         else:
             row["is_manual"] = False
-
-        enriched.append(row)
 
     df = pd.DataFrame(enriched)
     df["tokens_pour_capital"] = df["price"].apply(
@@ -306,6 +247,7 @@ def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
     # Toujours trié par ordre alphabétique, y compris les clubs saisis à la main.
     df = df.sort_values(by="name", ascending=True).reset_index(drop=True)
     st.session_state["_live_ok"] = live_ok
+    st.session_state["_candidates"] = candidates
     st.session_state["_no_token_flags"] = no_token_flags
     return df
 
@@ -321,8 +263,7 @@ devise = st.sidebar.selectbox("Devise", ["eur", "usd"], index=0)
 
 if st.sidebar.button("🔄 Rafraîchir clubs & prix"):
     load_teams.clear()
-    load_fx_rate.clear()
-    load_single_price.clear()
+    load_prices.clear()
     st.rerun()
 
 df = build_dataframe(capital, devise)
@@ -337,9 +278,8 @@ else:
 
 if not st.session_state.get("_prices_ok", True):
     st.sidebar.error(
-        "Impossible de récupérer les prix depuis fantokens.com pour l'instant "
-        "(réseau indisponible, site en rate-limit, ou taux de change USD/EUR "
-        "injoignable). Réessaie avec 🔄 dans un instant."
+        "Impossible de récupérer les prix depuis CoinGecko pour l'instant "
+        "(réseau indisponible ou API en rate-limit). Réessaie avec 🔄 dans un instant."
     )
     if st.session_state.get("_prices_error"):
         st.sidebar.caption(f"Détail : {st.session_state['_prices_error']}")
@@ -354,24 +294,20 @@ st.markdown(
         <img src="{SOCIOS_LOGO_URL}" />
         <div>
             <h1>⚽ Socios — Rendement des Fan Tokens</h1>
-            <p>Prix récupérés sur fantokens.com (converti en {devise.upper()}) · classement basé sur tes points de récompense saisis à la main</p>
+            <p>Prix via l'API publique CoinGecko · classement basé sur tes points de récompense saisis à la main</p>
         </div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-metrics = [
-    (f"{len(df)}", "Clubs suivis"),
-    (f"{n_matched}", "Avec un prix"),
-]
-if n_manual > 0:
-    # Carte masquée s'il n'y a aucun club en saisie manuelle, plutôt que
-    # d'afficher "0" en permanence.
-    metrics.append((f"{n_manual}", "Prix manuels"))
-metrics.append((f"{capital:.0f}{devise.upper()}", "Capital de référence"))
-
-for col, (value, label) in zip(st.columns(len(metrics)), metrics):
+m1, m2, m3, m4 = st.columns(4)
+for col, value, label in [
+    (m1, f"{len(df)}", "Clubs suivis"),
+    (m2, f"{n_matched}", "Avec un prix"),
+    (m3, f"{n_manual}", "Prix manuels"),
+    (m4, f"{capital:.0f}{devise.upper()}", "Capital de référence"),
+]:
     col.markdown(f'<div class="metric-card"><div class="value">{value}</div><div class="label">{label}</div></div>', unsafe_allow_html=True)
 
 st.write("")
@@ -387,18 +323,17 @@ tab_dashboard, tab_mapping, tab_ranking, tab_history = st.tabs(
 with tab_dashboard:
     no_token_flags = st.session_state.get("_no_token_flags", set())
     # Un club reste dans cette zone de saisie tant qu'il est marqué "aucun token
-    # trouvé" (même après avoir déjà un prix), tant que sa devise saisie ne
-    # correspond plus à la devise active, ou tant qu'il n'a toujours aucun prix
-    # (slug fantokens.com introuvable).
+    # trouvé" (même après avoir déjà un prix) — pour pouvoir changer la valeur
+    # à tout moment — ou tant qu'il n'a toujours aucun prix du tout.
     unmatched_df = df[(~df["matched"]) | (df["name"].isin(no_token_flags))].sort_values("name")
 
     if not unmatched_df.empty:
         st.markdown('<div class="manual-zone">', unsafe_allow_html=True)
         st.markdown(f"#### 🛠️ {len(unmatched_df)} club(s) en saisie manuelle")
         st.caption(
-            "Clubs sans prix trouvé sur fantokens.com (slug introuvable — corrige-le dans "
-            "l'onglet Correspondances), ou marqués « aucun token » à la main. Ils "
-            "réapparaissent dans le tableau principal dès qu'un prix est enregistré."
+            "Clubs sans correspondance automatique, ou marqués « aucun token trouvé » dans "
+            "l'onglet Correspondances. Ils restent ici pour pouvoir changer le prix, et "
+            "apparaissent aussi dans le tableau ci-dessous dès qu'un prix est enregistré."
         )
         for _, row in unmatched_df.iterrows():
             with st.form(key=f"quick_form_{row['name']}", border=False):
@@ -418,146 +353,152 @@ with tab_dashboard:
                 submitted = c4.form_submit_button(btn_label, use_container_width=True)
                 if submitted:
                     if price_val > 0:
-                        storage.save_manual_price(row["name"], price_val, devise, is_fallback=True)
+                        storage.save_manual_price(row["name"], price_val, devise)
                         storage.save_no_token_flag(row["name"], True)
                         st.rerun()
                     else:
                         st.toast("Entre un prix supérieur à 0 avant d'enregistrer.", icon="⚠️")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    matched_df = df[df["matched"]].copy().sort_values("name").reset_index(drop=True)
+    matched_df = df[df["matched"]].copy()
+    matched_df["24h"] = matched_df["price_change_24h"]
 
     st.subheader(f"Pour {capital:.0f} {devise.upper()} investis")
+    st.caption("Tu peux corriger un prix directement dans la colonne « Prix » ci-dessous, puis cliquer sur Enregistrer.")
+
+    price_col = f"Prix ({devise.upper()})"
+
+    @st.fragment
+    def _price_editor_fragment():
+        display_df = matched_df[["logo", "name", "token_symbol", "price", "24h", "tokens_pour_capital"]].rename(
+            columns={
+                "logo": "Logo",
+                "name": "Club",
+                "token_symbol": "Token",
+                "price": price_col,
+                "24h": "24h",
+                "tokens_pour_capital": f"Tokens pour {capital:.0f}{devise.upper()}",
+            }
+        )
+        edited_df = st.data_editor(
+            display_df,
+            column_config={
+                "Logo": st.column_config.ImageColumn("Logo", width="small"),
+                "Club": st.column_config.TextColumn(disabled=True),
+                "Token": st.column_config.TextColumn(disabled=True),
+                price_col: st.column_config.NumberColumn(format="%.5f", min_value=0.0, step=0.001),
+                "24h": st.column_config.NumberColumn(disabled=True, format="%.2f%%"),
+                f"Tokens pour {capital:.0f}{devise.upper()}": st.column_config.NumberColumn(disabled=True),
+            },
+            disabled=["Logo"],
+            hide_index=True,
+            use_container_width=True,
+            key="matched_price_editor",
+        )
+        if st.button("💾 Enregistrer les prix corrigés"):
+            changed = 0
+            for i in edited_df.index:
+                new_price = edited_df.loc[i, price_col]
+                old_price = display_df.loc[i, price_col]
+                if pd.notna(new_price) and new_price != old_price and new_price > 0:
+                    storage.save_manual_price(edited_df.loc[i, "Club"], float(new_price), devise)
+                    changed += 1
+            if changed:
+                st.rerun(scope="app")  # rerun complet nécessaire : le prix impacte d'autres onglets
+            else:
+                st.toast("Aucun prix modifié.", icon="ℹ️")
+
+    _price_editor_fragment()
+
+    st.divider()
+    st.markdown("#### Saisir les points gagnés / jour")
     st.caption(
-        "Corrige un prix ou saisis les points gagnés/jour directement dans le tableau, puis "
-        "clique sur Enregistrer. Le bouton 📋 copie dans le presse-papier le nombre de tokens "
-        "(arrondi à l'entier inférieur) pour coller directement dans l'appli Socios."
+        "Pour chaque club, rentre le nombre de points de récompense (Reward Points) que "
+        "l'appli Socios t'affiche par jour, pour le nombre de tokens indiqué ci-dessus. "
+        "Les clubs les moins récemment mis à jour sont en haut, pour savoir par où commencer."
     )
 
     latest_entries = storage.get_latest_entry_per_club()
-    club_links = storage.get_club_links()
     today = datetime.now().date()
 
     def _days_since(club):
         entry = latest_entries.get(club)
         if not entry:
-            return "Jamais"
+            return 99999  # jamais saisi -> tout en haut
         try:
-            d = (today - datetime.strptime(entry["entry_date"], "%Y-%m-%d").date()).days
-            return "Aujourd'hui" if d == 0 else f"Il y a {d} j"
+            d = datetime.strptime(entry["entry_date"], "%Y-%m-%d").date()
+            return (today - d).days
         except Exception:
-            return "—"
+            return 99999
+
+    club_links = storage.get_club_links()
+
+    input_rows = matched_df[["name", "price", "tokens_pour_capital"]].copy()
+    input_rows["_days"] = input_rows["name"].apply(_days_since)
+    input_rows["Dernière saisie"] = input_rows["_days"].apply(
+        lambda d: "Jamais" if d >= 99999 else ("Aujourd'hui" if d == 0 else f"Il y a {d} j")
+    )
+    input_rows = input_rows.sort_values("name").drop(columns=["_days"]).reset_index(drop=True)
+    input_rows["points_par_jour"] = None
 
     @st.fragment
-    def _merged_table_fragment():
-        hc = st.columns([0.6, 2.1, 1.2, 0.9, 1.3, 1.2, 1.1, 1.0, 1.0])
-        for c, label in zip(
-            hc, ["", "Club", f"Prix ({devise.upper()})", "24h", f"Tokens/{capital:.0f}{devise.upper()}",
-                 "Points/jour", "Dernière saisie", "Lien", "Copier"]
-        ):
-            c.markdown(f"**{label}**")
+    def _saisie_fragment():
+        hc1, hc2, hc3, hc4, hc5 = st.columns([2.4, 1.3, 1.1, 1.6, 1.4])
+        hc1.markdown("**Club**")
+        hc2.markdown("**Dernière saisie**")
+        hc3.markdown("**Prix**")
+        hc4.markdown("**Points / jour**")
+        hc5.markdown("**Lien**")
 
-        for _, row in matched_df.iterrows():
+        for _, row in input_rows.iterrows():
             club = row["name"]
-            c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns(
-                [0.6, 2.1, 1.2, 0.9, 1.3, 1.2, 1.1, 1.0, 1.0]
-            )
-            c1.image(row["logo"], width=30)
-            c2.write(club)
-
-            price_val = c3.number_input(
-                "Prix", min_value=0.0, step=0.001, format="%.5f",
-                value=float(row["price"]) if pd.notna(row["price"]) else 0.0,
-                key=f"price_{club}", label_visibility="collapsed",
-            )
-
-            change = row.get("price_change_24h")
-            if pd.notna(change):
-                css_class = "price-up" if change >= 0 else "price-down"
-                c4.markdown(f'<span class="{css_class}">{change:+.2f}%</span>', unsafe_allow_html=True)
-            else:
-                c4.write("—")
-
-            tokens_val = (capital / price_val) if price_val and price_val > 0 else 0.0
-            c5.write(f"{tokens_val:.2f}")
-
-            c6.number_input(
+            c1, c2, c3, c4, c5 = st.columns([2.4, 1.3, 1.1, 1.6, 1.4])
+            c1.write(club)
+            c2.write(row["Dernière saisie"])
+            c3.write(f'{row["price"]:.5f}' if pd.notna(row["price"]) else "—")
+            c4.number_input(
                 "Points/jour", min_value=0.0, step=0.1, value=0.0,
                 key=f"pts_{club}", label_visibility="collapsed",
             )
-
-            c7.caption(_days_since(club))
-
             url = club_links.get(club)
             if url:
-                c8.link_button("🔗", url, use_container_width=True)
+                c5.link_button("🔗 Ouvrir", url, use_container_width=True)
             else:
-                c8.caption("—")
+                c5.caption("—")
 
-            tokens_floor = int(tokens_val)
-            c9.markdown(
-                f'''<button onclick="navigator.clipboard.writeText('{tokens_floor}')"
-                    style="background-color:#1a1d29;color:#f5f6fa;border:1px solid #f107a3;
-                    border-radius:6px;padding:0.4rem 0.3rem;cursor:pointer;width:100%;
-                    font-size:0.8rem;" title="Copier {tokens_floor} dans le presse-papier">
-                    📋 {tokens_floor}</button>''',
-                unsafe_allow_html=True,
-            )
-
-        st.write("")
-        if st.button("💾 Enregistrer (prix corrigés + points/jour)", type="primary"):
-            price_changes = 0
-            entries_to_save = []
-            for _, row in matched_df.iterrows():
-                club = row["name"]
-                new_price = st.session_state.get(f"price_{club}")
-                old_price = float(row["price"]) if pd.notna(row["price"]) else None
-                if new_price and new_price > 0 and (old_price is None or abs(new_price - old_price) > 1e-9):
-                    storage.save_manual_price(club, float(new_price), devise)
-                    price_changes += 1
-
-                pts = st.session_state.get(f"pts_{club}", 0.0)
-                if pts and pts > 0:
-                    price_for_entry = new_price if new_price and new_price > 0 else old_price
-                    tokens_qty = (capital / price_for_entry) if price_for_entry else 0.0
-                    entries_to_save.append({
-                        "club": club,
-                        "tokens_qty": round(tokens_qty, 2),
-                        "points_per_day": float(pts),
-                        "price_at_entry": price_for_entry,
-                    })
-
-            if entries_to_save:
-                storage.add_entries_bulk(entries_to_save)
-
-            if price_changes or entries_to_save:
-                msg = []
-                if price_changes:
-                    msg.append(f"{price_changes} prix corrigé(s)")
-                if entries_to_save:
-                    msg.append(f"{len(entries_to_save)} saisie(s) de points/jour")
-                st.success(" et ".join(msg) + f" enregistré(s) le {datetime.now().strftime('%d/%m/%Y')}.")
-                st.rerun(scope="app")  # rerun complet : le prix impacte les autres onglets
+        if st.button("💾 Enregistrer les saisies", type="primary"):
+            to_save = [
+                {
+                    "club": row["name"],
+                    "tokens_qty": float(row["tokens_pour_capital"]),
+                    "points_per_day": float(st.session_state[f"pts_{row['name']}"]),
+                    "price_at_entry": float(row["price"]) if pd.notna(row["price"]) else None,
+                }
+                for _, row in input_rows.iterrows()
+                if st.session_state.get(f"pts_{row['name']}", 0.0) > 0
+            ]
+            if to_save:
+                storage.add_entries_bulk(to_save)  # une seule requête pour tout le lot
+                st.success(f"{len(to_save)} saisie(s) enregistrée(s) le {datetime.now().strftime('%d/%m/%Y')}.")
             else:
-                st.toast("Rien à enregistrer.", icon="ℹ️")
+                st.warning("Aucune valeur de points/jour renseignée.")
 
-    _merged_table_fragment()
+    _saisie_fragment()
 
 # ---------------------------------------------------------------------------
 # Tab 2 : correspondances / corrections manuelles
 # ---------------------------------------------------------------------------
 
 with tab_mapping:
-    st.subheader("Vérifier / corriger les correspondances club → fantokens.com")
+    st.subheader("Vérifier / corriger les correspondances club → token")
     st.caption(
-        "Le slug fantokens.com est deviné automatiquement à partir du nom du club "
-        "(ex: « Paris Saint-Germain » → paris-saint-germain-fan-token). Quand la "
-        "déduction se trompe (sigles, accents...), colle ici le bon slug ou l'URL "
-        "complète de la page https://www.fantokens.com/fr/trade/<slug> — un bouton "
-        "« Vérifier » interroge fantokens.com avant d'enregistrer, pour être sûr que "
-        "ça correspond bien. Coche « aucun token » si le club n'a vraiment aucun "
-        "Fan Token (le prix reste alors saisi à la main dans l'onglet Saisie)."
+        "Choisis « — aucun — » pour un club sans le bon token : il part automatiquement "
+        "dans la zone de saisie manuelle de l'onglet Saisie, où tu rentres son prix à la main."
     )
+    candidates = st.session_state.get("_candidates", [])
+    options = {"— aucun —": None}
+    options.update({f'{c["name"]} ({c["symbol"].upper()})': c["id"] for c in candidates})
+
     saved_mappings = storage.get_saved_mappings()
     no_token_flags = storage.get_no_token_flags()
     club_links = storage.get_club_links()
@@ -565,50 +506,29 @@ with tab_mapping:
     for _, row in df.iterrows():
         club = row["name"]
         flagged = club in no_token_flags
-        current_slug = saved_mappings.get(club) or guess_slug(club)
 
-        cols = st.columns([0.6, 2.2, 2.6, 1.1, 1.5])
-        cols[0].image(row["logo"], width=36)
-        cols[1].markdown(f"**{club}**" + ("  \n✅ prix trouvé" if row["matched"] else "  \n⚠️ pas de prix"))
+        cols = st.columns([1, 3, 4])
+        cols[0].image(row["logo"], width=40)
+        cols[1].markdown(f"**{club}**")
 
-        new_slug = cols[2].text_input(
-            "Slug fantokens.com", value=current_slug, key=f"slug_{club}",
-            label_visibility="collapsed", disabled=flagged,
+        current_id = None if flagged else saved_mappings.get(club, row["token_id"])
+        current_label = next((k for k, v in options.items() if v == current_id), "— aucun —")
+        choice = cols[2].selectbox(
+            "Token", list(options.keys()), index=list(options.keys()).index(current_label),
+            key=f"map_{club}", label_visibility="collapsed",
         )
-        # Si un lien complet est collé, on ne garde que le dernier segment de l'URL.
-        new_slug = new_slug.strip().rstrip("/").split("/")[-1]
+        new_id = options[choice]
 
-        if cols[3].button("Vérifier", key=f"check_{club}", use_container_width=True, disabled=flagged):
-            try:
-                found = fetch_fantoken_page(new_slug)
-            except Exception as e:
-                st.toast(f"Erreur réseau : {e}", icon="⚠️")
-                found = None
-            if found:
-                storage.save_mapping(club, new_slug)
-                storage.save_no_token_flag(club, False)
-                # Nettoie l'éventuel prix saisi à la main entre-temps (le
-                # temps que le slug soit cassé) : maintenant qu'un prix
-                # automatique est retrouvé, il doit reprendre la main, sinon
-                # l'ancien prix manuel continue de tout écraser pour
-                # toujours et le compteur "Prix manuels" ne redescend jamais.
-                storage.save_manual_price(club, None)
-                if found.get("logo"):
-                    # Le logo trouvé sur fantokens.com écrase celui de
-                    # socios.com/seed (cf. load_teams) — plus besoin de le
-                    # chercher/coller à la main.
-                    storage.save_extra_club(club, found["logo"])
-                load_teams.clear()
-                st.toast(f'Trouvé : {found["name"]} — ${found["price_usd"]:.5f}. Enregistré.', icon="✅")
-                st.rerun()
-            else:
-                st.toast(f"Aucune page fantokens.com/fr/trade/{new_slug} — vérifie le slug.", icon="❌")
-
-        flag_now = cols[4].checkbox("Aucun token", value=flagged, key=f"flag_{club}")
-        if flag_now != flagged:
-            storage.save_no_token_flag(club, flag_now)
-            if flag_now:
-                storage.save_mapping(club, None)
+        if new_id is None and (not flagged or current_id is not None):
+            # "— aucun —" choisi : le club part en saisie manuelle dans l'onglet Saisie.
+            storage.save_no_token_flag(club, True)
+            storage.save_mapping(club, None)
+            st.rerun()
+        elif new_id is not None and (flagged or new_id != saved_mappings.get(club, row["token_id"])):
+            # Un vrai token choisi : on retire le drapeau "aucun token" s'il y était,
+            # et on enregistre la correspondance.
+            storage.save_no_token_flag(club, False)
+            storage.save_mapping(club, new_id)
             st.rerun()
 
         with st.expander(f"🔗 Lien direct vers la page Socios de {club}"):
@@ -619,68 +539,6 @@ with tab_mapping:
             if st.button("Enregistrer le lien", key=f"link_save_{club}"):
                 storage.save_club_link(club, new_link.strip() or None)
                 st.toast(f"Lien enregistré pour {club}." if new_link.strip() else f"Lien retiré pour {club}.", icon="🔗")
-
-    st.divider()
-    st.markdown("#### ➕ Ajouter un club manquant")
-    st.caption(
-        "Le scraping de socios.com peut passer à côté de certains clubs. Ajoute-le ici "
-        "à la main (nom exact + slug fantokens.com, comme pour vérifier un prix ci-dessus) "
-        "— le logo est récupéré automatiquement depuis la même page fantokens.com, pas "
-        "besoin de le chercher/coller toi-même."
-    )
-    with st.form("add_manual_club", border=False):
-        ac1, ac2, ac3 = st.columns([2, 3, 1.2])
-        new_club_name = ac1.text_input("Nom du club", placeholder="Ex: AS Saint-Étienne")
-        new_club_slug = ac2.text_input(
-            "Slug fantokens.com", placeholder="ex: as-saint-etienne-fan-token (ou URL complète)"
-        )
-        # Le bouton n'a pas de label au-dessus de lui contrairement aux deux
-        # champs texte -> sans ce spacer invisible de la même hauteur qu'un
-        # label Streamlit, il remonte et n'est plus aligné avec les inputs.
-        ac3.markdown(
-            "<div style='height: 1.9rem;'></div>", unsafe_allow_html=True
-        )
-        add_submitted = ac3.form_submit_button("Ajouter", use_container_width=True)
-        if add_submitted:
-            name = new_club_name.strip()
-            slug = new_club_slug.strip().rstrip("/").split("/")[-1]
-            if not name or not slug:
-                st.warning("Nom et slug fantokens.com sont obligatoires.")
-            else:
-                try:
-                    found = fetch_fantoken_page(slug)
-                except Exception as e:
-                    found = None
-                    st.error(f"Erreur réseau en vérifiant le slug : {e}")
-                if found is None:
-                    st.error(
-                        f"Aucune page fantokens.com/fr/trade/{slug} trouvée — vérifie le slug "
-                        "(colle l'URL complète de la page si besoin)."
-                    )
-                else:
-                    logo = found.get("logo")
-                    storage.save_extra_club(name, logo or SOCIOS_LOGO_URL)
-                    storage.save_mapping(name, slug)
-                    load_teams.clear()
-                    if logo:
-                        st.success(f"« {name} » ajouté avec son logo et son prix ({slug}).")
-                    else:
-                        st.warning(
-                            f"« {name} » ajouté avec son prix ({slug}), mais aucun logo trouvé "
-                            "sur la page — logo Socios générique utilisé en attendant."
-                        )
-                    st.rerun()
-
-    extra_clubs = storage.get_extra_clubs()
-    if extra_clubs:
-        st.caption("Clubs ajoutés à la main :")
-        for name, logo in extra_clubs.items():
-            rc1, rc2, rc3 = st.columns([0.6, 3, 1])
-            rc1.image(logo, width=30)
-            rc2.write(name)
-            if rc3.button("🗑️ Retirer", key=f"del_extra_{name}"):
-                storage.delete_extra_club(name)
-                st.rerun()
 
 # ---------------------------------------------------------------------------
 # Tab 3 : classement
