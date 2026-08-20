@@ -560,9 +560,36 @@ with tab_ranking:
                 }
             )
         if rows:
-            rank_col = f"Points/jour pour {capital:.0f}{devise.upper()} (actualisé)"
+            rank_col = "Points/jour saisis"  # classement basé sur ce que tu as toi-même saisi
             rank_df = pd.DataFrame(rows).sort_values(rank_col, ascending=False)
             rank_df.insert(0, "#", range(1, len(rank_df) + 1))
+
+            # Comparaison avec le dernier classement connu (mis à jour une fois par
+            # jour) pour afficher qui a monté / baissé / stagné depuis la dernière fois.
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            prev_snapshot = storage.get_rank_snapshot()
+            current_positions = dict(zip(rank_df["Club"], rank_df["#"]))
+
+            def _movement(club):
+                prev = prev_snapshot.get(club)
+                if not prev:
+                    return "🆕 Nouveau"
+                delta = prev["position"] - current_positions[club]  # positif = a monté
+                if delta > 0:
+                    return f"▲ +{delta}"
+                elif delta < 0:
+                    return f"▼ {delta}"
+                else:
+                    return "="
+
+            rank_df["Évolution"] = rank_df["Club"].apply(_movement)
+
+            # On ne réécrit le snapshot que si la référence stockée date d'avant
+            # aujourd'hui (sinon rouvrir la page toute la journée écraserait la
+            # comparaison en la comparant à elle-même).
+            snapshot_dates = {v["date"] for v in prev_snapshot.values()}
+            if not snapshot_dates or snapshot_dates != {today_str}:
+                storage.save_rank_snapshot(current_positions, today_str)
 
             leader = rank_df.iloc[0]
             lc1, lc2 = st.columns([0.15, 0.85])
@@ -571,11 +598,11 @@ with tab_ranking:
             with lc2:
                 st.markdown(
                     f"##### 🥇 Meilleur rendement actuel : **{leader['Club']}**  \n"
-                    f"{leader[rank_col]:.3f} points/jour pour {capital:.0f}{devise.upper()} investis"
+                    f"{leader[rank_col]:.1f} points/jour saisis"
                 )
 
             top = rank_df.head(10).copy().sort_values(rank_col, ascending=True)
-            st.markdown("##### 🏆 Top 10 — points/jour actualisés")
+            st.markdown("##### 🏆 Top 10 — points/jour saisis")
             # st.bar_chart ne garantissait pas l'ordre des barres — on force le tri
             # explicitement via Altair (sort par valeur décroissante, du haut vers le bas).
             import altair as alt
@@ -591,13 +618,14 @@ with tab_ranking:
             st.altair_chart(chart, use_container_width=True)
 
             st.markdown("##### Classement complet")
+            display_cols = ["#", "Évolution", "Club", "Prix actuel", "Dernière saisie", rank_col]
             st.dataframe(
-                rank_df,
+                rank_df[display_cols],
                 hide_index=True,
                 use_container_width=True,
                 column_config={
                     rank_col: st.column_config.ProgressColumn(
-                        rank_col, format="%.3f",
+                        rank_col, format="%.1f",
                         min_value=0.0, max_value=float(rank_df[rank_col].max()),
                     ),
                 },
