@@ -69,7 +69,6 @@ st.markdown(
         color: #ffffff !important;
     }
     .stButton > button p { color: #f5f6fa !important; }
-
     /* Bouton de soumission d'un st.form (utilisé dans la zone de saisie
        manuelle) : classe CSS différente de .stButton, sinon texte invisible. */
     .stFormSubmitButton > button {
@@ -82,7 +81,6 @@ st.markdown(
         border-color: #ff4fc3 !important;
     }
     .stFormSubmitButton > button p { color: #f5f6fa !important; }
-
     /* st.form ajoute par défaut une marge/bordure qui décale son contenu par
        rapport aux autres lignes — on l'enlève pour garder l'alignement. */
     div[data-testid="stForm"] {
@@ -90,14 +88,11 @@ st.markdown(
         padding: 0 !important;
         margin: 0 !important;
     }
-
     /* Texte affiché (valeur sélectionnée) dans les selectbox — sinon reste
        invisible même quand le menu déroulant lui-même est bien stylé. */
     div[data-baseweb="select"] * { color: #f5f6fa !important; }
-
     /* Checkbox */
     .stCheckbox label p { color: #f5f6fa !important; }
-
     /* data_editor / dataframe cellules */
     div[data-testid="stDataFrame"], div[data-testid="stDataEditor"] {
         border-radius: 10px; overflow: hidden;
@@ -105,7 +100,6 @@ st.markdown(
     div[data-testid="stDataFrame"] *, div[data-testid="stDataEditor"] * {
         color: #0f1117 !important;
     }
-
     .socios-hero {
         background: linear-gradient(135deg, #7b2ff7 0%, #f107a3 100%);
         padding: 1.4rem 1.8rem; border-radius: 14px; margin-bottom: 1.2rem;
@@ -132,7 +126,6 @@ st.markdown(
     }
     .manual-zone h4, .manual-zone p, .manual-zone .stCaption { color: #ffe4b8 !important; }
     div[data-testid="stCaptionContainer"], .stCaption { color: #c7cbdb !important; }
-
     /* Empêche l'assombrissement/le fondu que Streamlit applique automatiquement
        au contenu pendant qu'un rechargement (rerun) est en cours. Streamlit
        marque les blocs "obsolètes" avec l'attribut data-stale="true" et réduit
@@ -158,7 +151,6 @@ st.markdown(
 # ---------------------------------------------------------------------------
 # Chargement des données (cache 1h pour ne pas spammer socios.com / CoinGecko)
 # ---------------------------------------------------------------------------
-
 @st.cache_data(ttl=3600, show_spinner="Récupération des clubs sur socios.com...")
 def load_teams():
     teams, live_ok = get_teams()
@@ -231,7 +223,6 @@ def load_prices(club_slugs: dict, vs_currency: str) -> dict:
 
 def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
     teams, live_ok = load_teams()
-
     saved_mappings = storage.get_saved_mappings()  # club -> slug fantokens.com (corrigé à la main)
     no_token_flags = storage.get_no_token_flags()
     manual_prices = storage.get_manual_prices()  # club -> {"price":..., "currency":...}
@@ -259,7 +250,6 @@ def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
     for team in teams:
         club = team["name"]
         row = dict(team)
-
         if club in no_token_flags:
             row.update(matched=False, price=None, price_change_24h=None)
         else:
@@ -306,6 +296,7 @@ def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
     )
     # Toujours trié par ordre alphabétique, y compris les clubs saisis à la main.
     df = df.sort_values(by="name", ascending=True).reset_index(drop=True)
+
     st.session_state["_live_ok"] = live_ok
     st.session_state["_no_token_flags"] = no_token_flags
     return df
@@ -314,7 +305,6 @@ def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
-
 st.sidebar.markdown(f'<img src="{SOCIOS_LOGO_URL}" class="sidebar-logo" />', unsafe_allow_html=True)
 st.sidebar.title("⚙️ Paramètres")
 capital = st.sidebar.number_input("Capital de référence (€)", min_value=1.0, value=100.0, step=10.0)
@@ -384,9 +374,9 @@ tab_dashboard, tab_mapping, tab_ranking, tab_history = st.tabs(
 # ---------------------------------------------------------------------------
 # Tab 1 : saisie
 # ---------------------------------------------------------------------------
-
 with tab_dashboard:
     no_token_flags = st.session_state.get("_no_token_flags", set())
+
     # Un club reste dans cette zone de saisie tant qu'il est marqué "aucun token
     # trouvé" (même après avoir déjà un prix), tant que sa devise saisie ne
     # correspond plus à la devise active, ou tant qu'il n'a toujours aucun prix
@@ -490,25 +480,12 @@ with tab_dashboard:
             c7.caption(_days_since(club))
 
             # Bouton unique : copie le nombre de tokens (arrondi) dans le presse-papier
-            # ET ouvre la page Socios du club, en un seul clic. On utilise un <a>
-            # natif pour la navigation (fonctionne toujours, même si le JS est bloqué)
-            # et on tente la copie en plus via l'API clipboard.
             # ET ouvre la page Socios du club, en un seul clic. On utilise
             # components.html (et non st.markdown) car Streamlit retire les
             # attributs onclick du HTML injecté via markdown, même en unsafe_allow_html.
             tokens_floor = int(tokens_val)
             url = club_links.get(club)
             if url:
-                c8.markdown(
-                    f'''<a href="{url}" target="_blank" rel="noopener"
-                        onclick="try{{navigator.clipboard.writeText('{tokens_floor}')}}catch(e){{}}"
-                        style="display:block;text-align:center;text-decoration:none;
-                        background-color:#1a1d29;color:#f5f6fa;border:1px solid #f107a3;
-                        border-radius:6px;padding:0.45rem 0.3rem;font-size:0.8rem;"
-                        title="Copie {tokens_floor} dans le presse-papier et ouvre la page Socios">
-                        🔗 Ouvrir · 📋 {tokens_floor}</a>''',
-                    unsafe_allow_html=True,
-                )
                 btn_html = f'''
                 <a href="{url}" target="_blank" rel="noopener" id="btn_{club}"
                    onclick="try{{navigator.clipboard.writeText('{tokens_floor}');
@@ -521,20 +498,11 @@ with tab_dashboard:
                    title="Copie {tokens_floor} dans le presse-papier et ouvre la page Socios">
                    🔗 Ouvrir · 📋 {tokens_floor}</a>'''
             else:
-                c8.markdown(
-                    f'''<button onclick="try{{navigator.clipboard.writeText('{tokens_floor}')
                 btn_html = f'''
                 <button id="btn_{club}"
                    onclick="try{{navigator.clipboard.writeText('{tokens_floor}');
                         this.innerText='✅ Copié';setTimeout(()=>{{this.innerText='📋 {tokens_floor}'}},1200);
                         }}catch(e){{}}"
-                        style="width:100%;background-color:#1a1d29;color:#f5f6fa;
-                        border:1px solid #3a3f52;border-radius:6px;padding:0.45rem 0.3rem;
-                        font-size:0.8rem;cursor:pointer;"
-                        title="Pas de lien enregistré — copie {tokens_floor} dans le presse-papier">
-                        📋 {tokens_floor}</button>''',
-                    unsafe_allow_html=True,
-                )
                    style="width:100%;box-sizing:border-box;background-color:#1a1d29;color:#f5f6fa;
                    border:1px solid #3a3f52;border-radius:6px;padding:0.45rem 0.3rem;
                    font-size:0.8rem;font-family:sans-serif;cursor:pointer;"
@@ -585,7 +553,6 @@ with tab_dashboard:
 # ---------------------------------------------------------------------------
 # Tab 2 : correspondances / corrections manuelles
 # ---------------------------------------------------------------------------
-
 with tab_mapping:
     st.subheader("Vérifier / corriger les correspondances club → fantokens.com")
     st.caption(
@@ -597,6 +564,7 @@ with tab_mapping:
         "ça correspond bien. Coche « aucun token » si le club n'a vraiment aucun "
         "Fan Token (le prix reste alors saisi à la main dans l'onglet Saisie)."
     )
+
     saved_mappings = storage.get_saved_mappings()
     no_token_flags = storage.get_no_token_flags()
     club_links = storage.get_club_links()
@@ -623,6 +591,7 @@ with tab_mapping:
             except Exception as e:
                 st.toast(f"Erreur réseau : {e}", icon="⚠️")
                 found = None
+
             if found:
                 storage.save_mapping(club, new_slug)
                 storage.save_no_token_flag(club, False)
@@ -691,6 +660,7 @@ with tab_mapping:
                 except Exception as e:
                     found = None
                     st.error(f"Erreur réseau en vérifiant le slug : {e}")
+
                 if found is None:
                     st.error(
                         f"Aucune page fantokens.com/fr/trade/{slug} trouvée — vérifie le slug "
@@ -724,16 +694,16 @@ with tab_mapping:
 # ---------------------------------------------------------------------------
 # Tab 3 : classement
 # ---------------------------------------------------------------------------
-
 with tab_ranking:
     st.subheader("Classement des clubs les plus rentables")
-    latest = storage.get_latest_entry_per_club()
 
+    latest = storage.get_latest_entry_per_club()
     if not latest:
         st.info("Aucune saisie pour l'instant — va dans l'onglet **Saisie** pour commencer.")
     else:
         price_by_club = dict(zip(df["name"], df["price"]))
         logo_by_club = dict(zip(df["name"], df["logo"]))
+
         rows = []
         for club, entry in latest.items():
             current_price = price_by_club.get(club)
@@ -751,6 +721,7 @@ with tab_ranking:
                     f"Points/jour pour {capital:.0f}{devise.upper()} (actualisé)": round(rendement_now, 3),
                 }
             )
+
         if rows:
             rank_col = "Points/jour saisis"  # classement basé sur ce que tu as toi-même saisi
             rank_df = pd.DataFrame(rows).sort_values(rank_col, ascending=False)
@@ -828,9 +799,9 @@ with tab_ranking:
 # ---------------------------------------------------------------------------
 # Tab 4 : évolution dans le temps
 # ---------------------------------------------------------------------------
-
 with tab_history:
     st.subheader("Évolution du rendement dans le temps")
+
     all_entries = storage.get_all_entries()
     if not all_entries:
         st.info("Aucun historique pour l'instant.")
@@ -860,6 +831,7 @@ with tab_history:
                 st.info("Sélectionne au moins un club pour afficher le graphique.")
 
         _evolution_fragment()
+
         with st.expander("Voir toutes les saisies (modifier ou supprimer une entrée)"):
             st.caption("Tu peux corriger une valeur erronée directement dans les cases ci-dessous, puis Enregistrer.")
             hist_edit_df = pd.DataFrame([dict(r) for r in all_entries])[
