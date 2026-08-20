@@ -351,13 +351,17 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-m1, m2, m3, m4 = st.columns(4)
-for col, value, label in [
-    (m1, f"{len(df)}", "Clubs suivis"),
-    (m2, f"{n_matched}", "Avec un prix"),
-    (m3, f"{n_manual}", "Prix manuels"),
-    (m4, f"{capital:.0f}{devise.upper()}", "Capital de référence"),
-]:
+metrics = [
+    (f"{len(df)}", "Clubs suivis"),
+    (f"{n_matched}", "Avec un prix"),
+]
+if n_manual > 0:
+    # Carte masquée s'il n'y a aucun club en saisie manuelle, plutôt que
+    # d'afficher "0" en permanence.
+    metrics.append((f"{n_manual}", "Prix manuels"))
+metrics.append((f"{capital:.0f}{devise.upper()}", "Capital de référence"))
+
+for col, (value, label) in zip(st.columns(len(metrics)), metrics):
     col.markdown(f'<div class="metric-card"><div class="value">{value}</div><div class="label">{label}</div></div>', unsafe_allow_html=True)
 
 st.write("")
@@ -573,6 +577,12 @@ with tab_mapping:
             if found:
                 storage.save_mapping(club, new_slug)
                 storage.save_no_token_flag(club, False)
+                # Nettoie l'éventuel prix saisi à la main entre-temps (le
+                # temps que le slug soit cassé) : maintenant qu'un prix
+                # automatique est retrouvé, il doit reprendre la main, sinon
+                # l'ancien prix manuel continue de tout écraser pour
+                # toujours et le compteur "Prix manuels" ne redescend jamais.
+                storage.save_manual_price(club, None)
                 if found.get("logo"):
                     # Le logo trouvé sur fantokens.com écrase celui de
                     # socios.com/seed (cf. load_teams) — plus besoin de le
@@ -610,9 +620,9 @@ with tab_mapping:
     )
     with st.form("add_manual_club", border=False):
         ac1, ac2, ac3 = st.columns([2, 3, 1.2])
-        new_club_name = ac1.text_input("Nom du club", placeholder="Ex: Olympique Lyonnais")
+        new_club_name = ac1.text_input("Nom du club", placeholder="Ex: AS Saint-Étienne")
         new_club_slug = ac2.text_input(
-            "Slug fantokens.com", placeholder="ex: olympique-lyonnais-fan-token (ou URL complète)"
+            "Slug fantokens.com", placeholder="ex: as-saint-etienne-fan-token (ou URL complète)"
         )
         # Le bouton n'a pas de label au-dessus de lui contrairement aux deux
         # champs texte -> sans ce spacer invisible de la même hauteur qu'un
@@ -849,4 +859,3 @@ with tab_history:
                 if c5.button("🗑️", key=f"del_{r['id']}"):
                     storage.delete_entry(r["id"])
                     st.rerun()
-                
