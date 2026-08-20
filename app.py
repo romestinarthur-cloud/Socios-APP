@@ -161,9 +161,18 @@ st.markdown(
 @st.cache_data(ttl=3600, show_spinner="Récupération des clubs sur socios.com...")
 def load_teams():
     teams, live_ok = get_teams()
-    extra = storage.get_extra_clubs()  # clubs ajoutés à la main, manqués par le scraping
+    # extra : clubs ajoutés à la main (manqués par le scraping socios.com) OU
+    # logos récupérés depuis fantokens.com au moment du "Vérifier" — table
+    # réutilisée pour les deux cas : elle sert de SURCOUCHE de logo, qu'un
+    # club vienne du scraping ou non.
+    extra = storage.get_extra_clubs()
     if extra:
         existing_names = {t["name"] for t in teams}
+        # Écrase le logo des clubs déjà présents (ex : logo mieux trouvé sur
+        # fantokens.com que sur socios.com) au lieu de les ignorer.
+        for t in teams:
+            if t["name"] in extra:
+                t["logo"] = extra[t["name"]]
         teams = teams + [
             {"name": name, "logo": logo} for name, logo in extra.items() if name not in existing_names
         ]
@@ -564,6 +573,12 @@ with tab_mapping:
             if found:
                 storage.save_mapping(club, new_slug)
                 storage.save_no_token_flag(club, False)
+                if found.get("logo"):
+                    # Le logo trouvé sur fantokens.com écrase celui de
+                    # socios.com/seed (cf. load_teams) — plus besoin de le
+                    # chercher/coller à la main.
+                    storage.save_extra_club(club, found["logo"])
+                load_teams.clear()
                 st.toast(f'Trouvé : {found["name"]} — ${found["price_usd"]:.5f}. Enregistré.', icon="✅")
                 st.rerun()
             else:
@@ -589,21 +604,52 @@ with tab_mapping:
     st.markdown("#### ➕ Ajouter un club manquant")
     st.caption(
         "Le scraping de socios.com peut passer à côté de certains clubs. Ajoute-le ici "
-        "à la main (nom exact + logo + slug fantokens.com) pour qu'il apparaisse dans "
-        "le tableau principal."
+        "à la main (nom exact + slug fantokens.com, comme pour vérifier un prix ci-dessus) "
+        "— le logo est récupéré automatiquement depuis la même page fantokens.com, pas "
+        "besoin de le chercher/coller toi-même."
     )
     with st.form("add_manual_club", border=False):
         ac1, ac2, ac3 = st.columns([2, 3, 1.2])
         new_club_name = ac1.text_input("Nom du club", placeholder="Ex: Olympique Lyonnais")
-        new_club_logo = ac2.text_input("URL du logo", placeholder="https://...")
+        new_club_slug = ac2.text_input(
+            "Slug fantokens.com", placeholder="ex: olympique-lyonnais-fan-token (ou URL complète)"
+        )
+        # Le bouton n'a pas de label au-dessus de lui contrairement aux deux
+        # champs texte -> sans ce spacer invisible de la même hauteur qu'un
+        # label Streamlit, il remonte et n'est plus aligné avec les inputs.
+        ac3.markdown(
+            "<div style='height: 1.9rem;'></div>", unsafe_allow_html=True
+        )
         add_submitted = ac3.form_submit_button("Ajouter", use_container_width=True)
         if add_submitted:
-            if new_club_name.strip() and new_club_logo.strip():
-                storage.save_extra_club(new_club_name.strip(), new_club_logo.strip())
-                st.success(f"« {new_club_name.strip()} » ajouté — configure son slug fantokens.com ci-dessus.")
-                st.rerun()
+            name = new_club_name.strip()
+            slug = new_club_slug.strip().rstrip("/").split("/")[-1]
+            if not name or not slug:
+                st.warning("Nom et slug fantokens.com sont obligatoires.")
             else:
-                st.warning("Nom et logo sont obligatoires.")
+                try:
+                    found = fetch_fantoken_page(slug)
+                except Exception as e:
+                    found = None
+                    st.error(f"Erreur réseau en vérifiant le slug : {e}")
+                if found is None:
+                    st.error(
+                        f"Aucune page fantokens.com/fr/trade/{slug} trouvée — vérifie le slug "
+                        "(colle l'URL complète de la page si besoin)."
+                    )
+                else:
+                    logo = found.get("logo")
+                    storage.save_extra_club(name, logo or SOCIOS_LOGO_URL)
+                    storage.save_mapping(name, slug)
+                    load_teams.clear()
+                    if logo:
+                        st.success(f"« {name} » ajouté avec son logo et son prix ({slug}).")
+                    else:
+                        st.warning(
+                            f"« {name} » ajouté avec son prix ({slug}), mais aucun logo trouvé "
+                            "sur la page — logo Socios générique utilisé en attendant."
+                        )
+                    st.rerun()
 
     extra_clubs = storage.get_extra_clubs()
     if extra_clubs:
