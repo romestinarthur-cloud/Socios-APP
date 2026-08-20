@@ -162,10 +162,15 @@ def fetch_usd_to_eur_rate(timeout: int = 10) -> float:
     return float(rate)
 
 
-def fetch_all_prices(club_slugs: dict, vs_currency: str = "eur", timeout: int = 15) -> dict:
+def fetch_all_prices(
+    club_slugs: dict, vs_currency: str = "eur", timeout: int = 15, max_workers: int = 12
+) -> dict:
     """club_slugs : dict {club_name: slug}. Récupère le prix de chaque club
-    un par un (fantokens.com n'a pas d'endpoint qui renvoie tout d'un coup),
-    convertit en EUR si besoin, et renvoie
+    (fantokens.com n'a pas d'endpoint qui renvoie tout d'un coup), EN
+    PARALLÈLE via un ThreadPoolExecutor — vu que chaque requête passe le
+    plus clair de son temps à attendre le réseau, les paralléliser divise
+    le temps total par ~max_workers au lieu de faire la somme de toutes
+    les requêtes une par une. Convertit en EUR si besoin, et renvoie
     {club_name: {"price": float, "change_24h": float|None}} — les clubs
     dont le slug ne correspond à aucune page sont absents du résultat
     (ils resteront donc en zone de saisie manuelle côté app.py)."""
@@ -173,16 +178,23 @@ def fetch_all_prices(club_slugs: dict, vs_currency: str = "eur", timeout: int = 
     if vs_currency == "eur":
         fx_rate = fetch_usd_to_eur_rate(timeout=timeout)
 
+    items = [(club, slug) for club, slug in club_slugs.items() if slug]
     results = {}
-    for club, slug in club_slugs.items():
-        if not slug:
-            continue
-        try:
-            page = fetch_fantoken_page(slug, timeout=timeout)
-        except Exception:
-            continue
-        if not page:
-            continue
-        price = page["price_usd"] * fx_rate if vs_currency == "eur" else page["price_usd"]
-        results[club] = {"price": price, "change_24h": page["change_24h"]}
+    if not items:
+        return results
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(items))) as executor:
+        future_to_club = {
+            executor.submit(fetch_fantoken_page, slug, timeout): club for club, slug in items
+        }
+        for future in as_completed(future_to_club):
+            club = future_to_club[future]
+            try:
+                page = future.result()
+            except Exception:
+                continue
+            if not page:
+                continue
+            price = page["price_usd"] * fx_rate if vs_currency == "eur" else page["price_usd"]
+            results[club] = {"price": price, "change_24h": page["change_24h"]}
     return results
