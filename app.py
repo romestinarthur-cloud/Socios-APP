@@ -438,52 +438,44 @@ with tab_dashboard:
     input_rows["Dernière saisie"] = input_rows["_days"].apply(
         lambda d: "Jamais" if d >= 99999 else ("Aujourd'hui" if d == 0 else f"Il y a {d} j")
     )
-    input_rows = input_rows.sort_values("name").drop(columns=["_days"])
+    input_rows = input_rows.sort_values("name").drop(columns=["_days"]).reset_index(drop=True)
     input_rows["points_par_jour"] = None
 
     @st.fragment
     def _saisie_fragment():
-        input_edited = st.data_editor(
-            input_rows.rename(
-                columns={
-                    "name": "Club",
-                    "price": "Prix",
-                    "tokens_pour_capital": "Nb tokens",
-                }
-            ),
-            column_config={
-                "Club": st.column_config.TextColumn(disabled=True),
-                "Prix": st.column_config.NumberColumn(disabled=True, format="%.5f"),
-                "Nb tokens": st.column_config.NumberColumn(disabled=True),
-                "Dernière saisie": st.column_config.TextColumn(disabled=True),
-                "points_par_jour": st.column_config.NumberColumn("Points / jour", min_value=0.0, step=0.1),
-            },
-            column_order=["Club", "Dernière saisie", "Prix", "Nb tokens", "points_par_jour"],
-            hide_index=True,
-            use_container_width=True,
-            key="input_table",
-        )
+        hc1, hc2, hc3, hc4, hc5 = st.columns([2.4, 1.3, 1.1, 1.6, 1.4])
+        hc1.markdown("**Club**")
+        hc2.markdown("**Dernière saisie**")
+        hc3.markdown("**Prix**")
+        hc4.markdown("**Points / jour**")
+        hc5.markdown("**Lien**")
 
-        if club_links:
-            with st.expander(f"🔗 Accès rapide aux pages Socios ({len(club_links)} club(s) avec un lien enregistré)"):
-                cols_per_row = 3
-                items = sorted(club_links.items())
-                for i in range(0, len(items), cols_per_row):
-                    row_cols = st.columns(cols_per_row)
-                    for (club, url), col in zip(items[i:i + cols_per_row], row_cols):
-                        if url:
-                            col.link_button(f"🔗 {club}", url, use_container_width=True)
+        for _, row in input_rows.iterrows():
+            club = row["name"]
+            c1, c2, c3, c4, c5 = st.columns([2.4, 1.3, 1.1, 1.6, 1.4])
+            c1.write(club)
+            c2.write(row["Dernière saisie"])
+            c3.write(f'{row["price"]:.5f}' if pd.notna(row["price"]) else "—")
+            c4.number_input(
+                "Points/jour", min_value=0.0, step=0.1, value=0.0,
+                key=f"pts_{club}", label_visibility="collapsed",
+            )
+            url = club_links.get(club)
+            if url:
+                c5.link_button("🔗 Ouvrir", url, use_container_width=True)
+            else:
+                c5.caption("—")
 
         if st.button("💾 Enregistrer les saisies", type="primary"):
             to_save = [
                 {
-                    "club": r["Club"],
-                    "tokens_qty": float(r["Nb tokens"]),
-                    "points_per_day": float(r["points_par_jour"]),
-                    "price_at_entry": float(r["Prix"]) if pd.notna(r["Prix"]) else None,
+                    "club": row["name"],
+                    "tokens_qty": float(row["tokens_pour_capital"]),
+                    "points_per_day": float(st.session_state[f"pts_{row['name']}"]),
+                    "price_at_entry": float(row["price"]) if pd.notna(row["price"]) else None,
                 }
-                for _, r in input_edited.iterrows()
-                if pd.notna(r["points_par_jour"]) and r["points_par_jour"] not in (None, 0)
+                for _, row in input_rows.iterrows()
+                if st.session_state.get(f"pts_{row['name']}", 0.0) > 0
             ]
             if to_save:
                 storage.add_entries_bulk(to_save)  # une seule requête pour tout le lot
