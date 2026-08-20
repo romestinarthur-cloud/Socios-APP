@@ -1,5 +1,6 @@
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from datetime import datetime
 
 import storage
@@ -489,33 +490,36 @@ with tab_dashboard:
             c7.caption(_days_since(club))
 
             # Bouton unique : copie le nombre de tokens (arrondi) dans le presse-papier
-            # ET ouvre la page Socios du club, en un seul clic. On utilise un <a>
-            # natif pour la navigation (fonctionne toujours, même si le JS est bloqué)
-            # et on tente la copie en plus via l'API clipboard.
+            # ET ouvre la page Socios du club, en un seul clic. On utilise
+            # components.html (et non st.markdown) car Streamlit retire les
+            # attributs onclick du HTML injecté via markdown, même en unsafe_allow_html.
             tokens_floor = int(tokens_val)
             url = club_links.get(club)
             if url:
-                c8.markdown(
-                    f'''<a href="{url}" target="_blank" rel="noopener"
-                        onclick="try{{navigator.clipboard.writeText('{tokens_floor}')}}catch(e){{}}"
-                        style="display:block;text-align:center;text-decoration:none;
-                        background-color:#1a1d29;color:#f5f6fa;border:1px solid #f107a3;
-                        border-radius:6px;padding:0.45rem 0.3rem;font-size:0.8rem;"
-                        title="Copie {tokens_floor} dans le presse-papier et ouvre la page Socios">
-                        🔗 Ouvrir · 📋 {tokens_floor}</a>''',
-                    unsafe_allow_html=True,
-                )
-            else:
-                c8.markdown(
-                    f'''<button onclick="try{{navigator.clipboard.writeText('{tokens_floor}')
+                btn_html = f'''
+                <a href="{url}" target="_blank" rel="noopener" id="btn_{club}"
+                   onclick="try{{navigator.clipboard.writeText('{tokens_floor}');
+                        this.innerText='✅ Copié';setTimeout(()=>{{this.innerText='🔗 Ouvrir · 📋 {tokens_floor}'}},1200);
                         }}catch(e){{}}"
-                        style="width:100%;background-color:#1a1d29;color:#f5f6fa;
-                        border:1px solid #3a3f52;border-radius:6px;padding:0.45rem 0.3rem;
-                        font-size:0.8rem;cursor:pointer;"
-                        title="Pas de lien enregistré — copie {tokens_floor} dans le presse-papier">
-                        📋 {tokens_floor}</button>''',
-                    unsafe_allow_html=True,
-                )
+                   style="display:block;box-sizing:border-box;text-align:center;text-decoration:none;
+                   background-color:#1a1d29;color:#f5f6fa;border:1px solid #f107a3;
+                   border-radius:6px;padding:0.45rem 0.3rem;font-size:0.8rem;font-family:sans-serif;
+                   cursor:pointer;"
+                   title="Copie {tokens_floor} dans le presse-papier et ouvre la page Socios">
+                   🔗 Ouvrir · 📋 {tokens_floor}</a>'''
+            else:
+                btn_html = f'''
+                <button id="btn_{club}"
+                   onclick="try{{navigator.clipboard.writeText('{tokens_floor}');
+                        this.innerText='✅ Copié';setTimeout(()=>{{this.innerText='📋 {tokens_floor}'}},1200);
+                        }}catch(e){{}}"
+                   style="width:100%;box-sizing:border-box;background-color:#1a1d29;color:#f5f6fa;
+                   border:1px solid #3a3f52;border-radius:6px;padding:0.45rem 0.3rem;
+                   font-size:0.8rem;font-family:sans-serif;cursor:pointer;"
+                   title="Pas de lien enregistré — copie {tokens_floor} dans le presse-papier">
+                   📋 {tokens_floor}</button>'''
+            with c8:
+                components.html(btn_html, height=42)
 
         st.write("")
         if st.button("💾 Enregistrer (prix corrigés + points/jour)", type="primary"):
