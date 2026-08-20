@@ -1,175 +1,187 @@
 """
-Récupère les prix live des Fan Tokens Socios/Chiliz via l'API publique CoinGecko
-(pas de clé requise) et fait correspondre chaque club scrapé sur socios.com
-à son token sur CoinGecko (par similarité de nom, avec table de correction manuelle).
+Récupère les prix des Fan Tokens directement depuis fantokens.com.
+
+Pourquoi fantokens.com et pas l'API "markets" de CoinGecko comme avant :
+fantokens.com liste TOUS les tokens officiels Socios (le tableau d'accueil
+du site, lui, est rendu en JavaScript et n'est pas scrapable simplement),
+alors que la catégorie "fan-token" de CoinGecko en couvre nettement moins.
+
+La bonne nouvelle : chaque token a une page individuelle
+    https://www.fantokens.com/fr/trade/<slug>
+et CETTE page-là est rendue côté serveur (le prix est déjà dans le HTML
+brut, pas besoin d'exécuter du JavaScript) — on peut donc la scraper
+normalement avec requests + BeautifulSoup.
+
+Le <slug> correspond quasiment toujours à l'id CoinGecko du token
+(ex: "paris-saint-germain-fan-token", "fc-barcelona-fan-token"). On le
+devine à partir du nom du club (guess_slug), et pour les clubs où la
+déduction automatique échoue (sigles, accents, "de"/"the" qui sautent...),
+une correspondance manuelle club -> slug est enregistrée en base (même
+mécanisme que l'ancien mapping vers un id CoinGecko, réutilisé tel quel).
 """
 
+import re
 import time
+import unicodedata
+
 import requests
-from rapidfuzz import fuzz, process
+from bs4 import BeautifulSoup
 
-COINGECKO_MARKETS_URL = "https://api.coingecko.com/api/v3/coins/markets"
+FANTOKENS_TRADE_URL = "https://www.fantokens.com/fr/trade/{slug}"
+FX_RATE_URL = "https://api.frankfurter.app/latest"
 
-# Catégorie CoinGecko confirmée existante : https://www.coingecko.com/en/categories/fan-token
-CATEGORY_SLUGS_TO_TRY = ["fan-token"]
-
-# CoinGecko (derrière Cloudflare) bloque parfois les requêtes sans en-tête
-# "navigateur" plausible, ou renvoie 429 sur l'API gratuite publique en cas
-# de trop de requêtes. On met un User-Agent et on retry une fois en cas de 429.
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "application/json",
+    "Accept": "text/html,application/xhtml+xml",
+    "Accept-Language": "fr-FR,fr;q=0.9",
+}
+
+# Seul le "FC" final saute dans le slug fantokens.com/CoinGecko
+# ("Manchester City FC" -> "manchester-city-fan-token", "Arsenal FC" ->
+# "arsenal-fan-token"). En tête ou au milieu, en revanche, "FC"/"AC"/"AS"/...
+# fait PARTIE du slug ("FC Barcelona" -> "fc-barcelona-fan-token", "AC Milan"
+# -> "ac-milan-fan-token", "AS Roma" -> "as-roma-fan-token") — donc on ne
+# touche qu'au suffixe, jamais au reste du nom. Vérifié à la main sur une
+# quinzaine de clubs connus (cf. tests dans le repo / conversation).
+_TRAILING_FC_RE = re.compile(r"\s+(FC|F\.C\.)$", re.IGNORECASE)
+
+# Corrections manuelles pour les noms qui ne donnent toujours pas le bon
+# slug une fois passés dans guess_slug() (clé = nom exact affiché sur
+# socios.com). Liste de départ à corriger/compléter au fil de l'eau depuis
+# l'onglet Correspondances de l'appli (bouton "Vérifier" + enregistrement).
+MANUAL_SLUG_OVERRIDES = {
+    "Atlético de Madrid": "atletico-madrid-fan-token",
+    "FC Internazionale Milano": "inter-milan-fan-token",
+    "Galatasaray S.K.": "galatasaray-fan-token",
+    "İstanbul Başakşehir FK": "istanbul-basaksehir-fan-token",
+    "GNK Dinamo Zagreb": "dinamo-zagreb-fan-token",
+    "Göztepe S.K.": "goztepe-fan-token",
+    "S.C. Internacional": "internacional-fan-token",
+    "Levante U.D.": "levante-fan-token",
+    "Johor Darul Ta'zim F.C": "johor-darul-tazim-fan-token",
 }
 
 
-def _get_with_retry(url: str, params: dict, timeout: int, retries: int = 2):
+def _get_with_retry(url: str, timeout: int = 15, retries: int = 2, params: dict | None = None):
+    """GET avec retry. Retourne None sur 404 (page/slug inexistant),
+    lève une exception réseau après épuisement des tentatives."""
     last_exc = None
     for attempt in range(retries + 1):
         try:
-            r = requests.get(url, params=params, headers=REQUEST_HEADERS, timeout=timeout)
+            r = requests.get(url, headers=REQUEST_HEADERS, timeout=timeout, params=params)
+            if r.status_code == 404:
+                return None
             if r.status_code == 429:
                 time.sleep(2 * (attempt + 1))
-                last_exc = ConnectionError("CoinGecko: trop de requêtes (429), réessaie plus tard.")
+                last_exc = ConnectionError("fantokens.com : trop de requêtes (429), réessaie plus tard.")
                 continue
             r.raise_for_status()
             return r
         except requests.exceptions.RequestException as e:
             last_exc = e
             time.sleep(1 * (attempt + 1))
-    raise last_exc
+    if last_exc:
+        raise last_exc
+    return None
 
 
-def search_coingecko(query: str, timeout: int = 15) -> list[dict]:
-    """Recherche libre de tokens sur CoinGecko (pas limité à la catégorie fan-token)."""
-    if not query or not query.strip():
-        return []
-    r = _get_with_retry("https://api.coingecko.com/api/v3/search", {"query": query.strip()}, timeout)
-    return r.json().get("coins", [])
+def guess_slug(club_name: str) -> str:
+    """Devine le slug fantokens.com/CoinGecko à partir du nom du club.
+    Best effort : marche pour la majorité des clubs, mais certains noms
+    (accents rares, sigles non standards) auront besoin d'une correspondance
+    manuelle enregistrée via l'onglet Correspondances de l'appli."""
+    if club_name in MANUAL_SLUG_OVERRIDES:
+        return MANUAL_SLUG_OVERRIDES[club_name]
+    name = _TRAILING_FC_RE.sub("", club_name)
+    name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    name = re.sub(r"[^a-zA-Z0-9]+", "-", name).strip("-").lower()
+    return f"{name}-fan-token"
 
 
-def fetch_prices_by_ids(ids: list[str], vs_currency: str = "eur", timeout: int = 20) -> list[dict]:
-    """Récupère les prix pour une liste précise d'ids CoinGecko (ex: ceux choisis
-    manuellement via search_coingecko et pas forcément dans la catégorie fan-token)."""
-    ids = [i for i in dict.fromkeys(ids) if i]
-    if not ids:
-        return []
-    params = {
-        "vs_currency": vs_currency,
-        "ids": ",".join(ids),
-        "per_page": len(ids),
-        "page": 1,
-        "sparkline": "false",
-        "price_change_percentage": "24h",
-    }
-    r = _get_with_retry(COINGECKO_MARKETS_URL, params, timeout)
-    return r.json()
+_PRICE_RE = re.compile(r"\$\s?([\d\s]+[.,]\d+|\d+)")
+_CHANGE_RE = re.compile(r"([\-\u2212]?\s?\d+[.,]?\d*)\s*%\s*\(24h\)")
 
 
-def fetch_all_candidate_tokens(vs_currency: str = "eur", timeout: int = 20) -> list[dict]:
-    """Récupère les tokens de la catégorie fan-token sur CoinGecko."""
-    results = {}
-    errors = []
+def _parse_fr_number(raw: str) -> float:
+    """'0,486116' ou '1 234,56' -> float. Les pages fantokens.com sont en
+    français : virgule décimale, espace comme séparateur de milliers."""
+    cleaned = raw.replace("\u2212", "-").replace(" ", "").replace("\xa0", "").replace(",", ".")
+    return float(cleaned)
 
-    for cat in CATEGORY_SLUGS_TO_TRY:
+
+def fetch_fantoken_page(slug: str, timeout: int = 15):
+    """Scrape https://www.fantokens.com/fr/trade/<slug>.
+    Retourne {"price_usd": float, "change_24h": float|None, "name": str}
+    ou None si le slug n'existe pas (page 404) ou si le prix n'a pas pu
+    être trouvé dans la page."""
+    url = FANTOKENS_TRADE_URL.format(slug=slug)
+    r = _get_with_retry(url, timeout=timeout)
+    if r is None:
+        return None
+
+    soup = BeautifulSoup(r.text, "lxml")
+    text = soup.get_text(" ", strip=True)
+
+    price_match = _PRICE_RE.search(text)
+    if not price_match:
+        return None
+    try:
+        price_usd = _parse_fr_number(price_match.group(1))
+    except ValueError:
+        return None
+
+    change_match = _CHANGE_RE.search(text)
+    change_24h = None
+    if change_match:
         try:
-            params = {
-                "vs_currency": vs_currency,
-                "category": cat,
-                "order": "market_cap_desc",
-                "per_page": 250,
-                "page": 1,
-                "sparkline": "false",
-                "price_change_percentage": "24h",
-            }
-            r = _get_with_retry(COINGECKO_MARKETS_URL, params, timeout)
-            for coin in r.json():
-                results[coin["id"]] = coin
-        except Exception as e:
-            errors.append(f"{cat}: {e}")
+            change_24h = _parse_fr_number(change_match.group(1))
+        except ValueError:
+            change_24h = None
 
-    if not results:
-        detail = " | ".join(errors) if errors else "raison inconnue"
-        raise ConnectionError(f"Impossible de contacter l'API CoinGecko ({detail}).")
+    title_tag = soup.find("h1")
+    name = title_tag.get_text(strip=True) if title_tag else slug
 
-    return list(results.values())
+    return {"price_usd": price_usd, "change_24h": change_24h, "name": name}
 
 
-# Corrections manuelles pour les noms qui ne matchent pas bien automatiquement.
-# clé = nom exact tel qu'affiché sur socios.com -> valeur = id CoinGecko
-MANUAL_OVERRIDES = {
-    "FC Barcelona": "fc-barcelona-fan-token",
-    "FC Internazionale Milano": "inter-milan-fan-token",
-    "AC Milan": "ac-milan-fan-token",
-    "AS Roma": "as-roma-fan-token",
-    "Atlético de Madrid": "atletico-madrid-fan-token",
-    "Paris Saint-Germain": "paris-saint-germain-fan-token",
-    "Manchester City FC": "manchester-city-fan-token",
-    "Arsenal FC": "arsenal-fan-token",
-    "Tottenham Hotspur": "tottenham-hotspur-fan-token",
-    "Juventus": "juventus-fan-token",
-    "Galatasaray S.K.": "galatasaray-fan-token",
-    "SL Benfica": "sl-benfica-fan-token",
-    "Valencia CF": "valencia-cf-fan-token",
-    "Napoli": "napoli-fan-token",
-}
+def fetch_usd_to_eur_rate(timeout: int = 10) -> float:
+    """Taux de change USD -> EUR actuel (API gratuite Frankfurter, sans clé,
+    données BCE). Lève une exception si indisponible — pas de valeur bidon
+    en repli, mieux vaut afficher une erreur qu'un prix silencieusement faux."""
+    r = _get_with_retry(FX_RATE_URL, timeout=timeout, params={"from": "USD", "to": "EUR"})
+    if r is None:
+        raise ConnectionError("Impossible de récupérer le taux de change USD/EUR.")
+    data = r.json()
+    rate = data.get("rates", {}).get("EUR")
+    if not rate:
+        raise ConnectionError("Réponse inattendue de l'API de taux de change (pas de taux EUR).")
+    return float(rate)
 
 
-def best_match(team_name: str, candidates: list[dict], score_cutoff: int = 70):
-    """Trouve le token CoinGecko le plus proche du nom du club.
-    Retourne (coin_dict, score) — score=100 si trouvé via MANUAL_OVERRIDES,
-    score=None si rien de suffisamment proche n'a été trouvé."""
-    if team_name in MANUAL_OVERRIDES:
-        target_id = MANUAL_OVERRIDES[team_name]
-        for c in candidates:
-            if c["id"] == target_id:
-                return c, 100
+def fetch_all_prices(club_slugs: dict, vs_currency: str = "eur", timeout: int = 15) -> dict:
+    """club_slugs : dict {club_name: slug}. Récupère le prix de chaque club
+    un par un (fantokens.com n'a pas d'endpoint qui renvoie tout d'un coup),
+    convertit en EUR si besoin, et renvoie
+    {club_name: {"price": float, "change_24h": float|None}} — les clubs
+    dont le slug ne correspond à aucune page sont absents du résultat
+    (ils resteront donc en zone de saisie manuelle côté app.py)."""
+    fx_rate = 1.0
+    if vs_currency == "eur":
+        fx_rate = fetch_usd_to_eur_rate(timeout=timeout)
 
-    # Normalisation : on enlève le mot "Fan Token" côté CoinGecko pour comparer.
-    choices = {c["id"]: c["name"].replace("Fan Token", "").strip() for c in candidates}
-    match = process.extractOne(
-        team_name, choices, scorer=fuzz.WRatio, score_cutoff=score_cutoff
-    )
-    if not match:
-        return None, None
-    matched_id = match[2]
-    score = match[1]
-    for c in candidates:
-        if c["id"] == matched_id:
-            return c, round(score)
-    return None, None
-
-
-def match_teams_to_tokens(teams: list[dict], candidates: list[dict]) -> list[dict]:
-    """Pour chaque équipe {name, logo}, ajoute les infos token si trouvé :
-    token_id, token_symbol, price, price_change_24h, matched (bool), match_score."""
-    enriched = []
-    for team in teams:
-        coin, score = best_match(team["name"], candidates)
-        row = dict(team)
-        if coin:
-            row.update(
-                {
-                    "matched": True,
-                    "match_score": score,
-                    "token_id": coin["id"],
-                    "token_symbol": coin["symbol"].upper(),
-                    "price": coin.get("current_price"),
-                    "price_change_24h": coin.get("price_change_percentage_24h"),
-                }
-            )
-        else:
-            row.update(
-                {
-                    "matched": False,
-                    "match_score": None,
-                    "token_id": None,
-                    "token_symbol": None,
-                    "price": None,
-                    "price_change_24h": None,
-                }
-            )
-        enriched.append(row)
-    return enriched
+    results = {}
+    for club, slug in club_slugs.items():
+        if not slug:
+            continue
+        try:
+            page = fetch_fantoken_page(slug, timeout=timeout)
+        except Exception:
+            continue
+        if not page:
+            continue
+        price = page["price_usd"] * fx_rate if vs_currency == "eur" else page["price_usd"]
+        results[club] = {"price": price, "change_24h": page["change_24h"]}
+    return results
