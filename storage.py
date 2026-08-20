@@ -20,6 +20,7 @@ MAPPING_TABLE = "club_token_mapping"
 ENTRIES_TABLE = "entries"
 MANUAL_PRICE_TABLE = "manual_prices"
 NO_TOKEN_TABLE = "no_token_flags"
+RANK_SNAPSHOT_TABLE = "rank_snapshot"
 
 
 @st.cache_resource(show_spinner=False)
@@ -81,6 +82,15 @@ def init_db():
         f"""
         CREATE TABLE IF NOT EXISTS {NO_TOKEN_TABLE} (
             club TEXT PRIMARY KEY
+        )
+        """
+    )
+    cur.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {RANK_SNAPSHOT_TABLE} (
+            club TEXT PRIMARY KEY,
+            position INTEGER NOT NULL,
+            snapshot_date TEXT NOT NULL
         )
         """
     )
@@ -259,3 +269,30 @@ def get_saved_mappings() -> dict:
     rows = cur.fetchall()
     cur.close()
     return {r[0]: r[1] for r in rows}
+
+
+def get_rank_snapshot() -> dict:
+    """dict club -> {"position": int, "date": str} — dernier classement connu,
+    pour comparer et afficher les mouvements (▲/▼) dans le classement actuel."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(f"SELECT club, position, snapshot_date FROM {RANK_SNAPSHOT_TABLE}")
+    rows = cur.fetchall()
+    cur.close()
+    return {r[0]: {"position": r[1], "date": r[2]} for r in rows}
+
+
+def save_rank_snapshot(positions: dict, snapshot_date: str):
+    """Remplace le snapshot de classement stocké par les positions actuelles,
+    pour servir de référence de comparaison la prochaine fois."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(f"DELETE FROM {RANK_SNAPSHOT_TABLE}")
+    if positions:
+        psycopg2.extras.execute_values(
+            cur,
+            f"INSERT INTO {RANK_SNAPSHOT_TABLE} (club, position, snapshot_date) VALUES %s",
+            [(club, pos, snapshot_date) for club, pos in positions.items()],
+        )
+    conn.commit()
+    cur.close()
