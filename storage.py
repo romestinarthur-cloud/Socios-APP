@@ -391,4 +391,3 @@ def delete_extra_club(club: str):
     cur.execute(f"DELETE FROM {EXTRA_CLUBS_TABLE} WHERE club = %s", (club,))
     conn.commit()
     cur.close()
-
