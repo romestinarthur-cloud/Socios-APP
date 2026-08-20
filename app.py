@@ -450,17 +450,17 @@ with tab_dashboard:
 
     @st.fragment
     def _merged_table_fragment():
-        hc = st.columns([0.6, 2.1, 1.2, 0.9, 1.3, 1.2, 1.1, 1.6])
+        hc = st.columns([0.6, 2.1, 1.2, 0.9, 1.3, 1.2, 1.1, 1.0, 1.0])
         for c, label in zip(
             hc, ["", "Club", f"Prix ({devise.upper()})", "24h", f"Tokens/{capital:.0f}{devise.upper()}",
-                 "Points/jour", "Dernière saisie", "Lien + copier"]
+                 "Points/jour", "Dernière saisie", "Lien", "Copier"]
         ):
             c.markdown(f"**{label}**")
 
         for _, row in matched_df.iterrows():
             club = row["name"]
-            c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(
-                [0.6, 2.1, 1.2, 0.9, 1.3, 1.2, 1.1, 1.6]
+            c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns(
+                [0.6, 2.1, 1.2, 0.9, 1.3, 1.2, 1.1, 1.0, 1.0]
             )
             c1.image(row["logo"], width=30)
             c2.write(club)
@@ -488,42 +488,19 @@ with tab_dashboard:
 
             c7.caption(_days_since(club))
 
-            # Un seul bouton : copie le nombre de tokens dans le presse-papier
-            # ET ouvre le lien Socios du club (s'il y en a un) — plus besoin
-            # de deux boutons séparés. navigator.clipboard.writeText() est une
-            # Promise qui peut échouer silencieusement (permissions, focus
-            # perdu...) ; on l'attrape avec .then()/.catch() et on donne un
-            # retour visuel (bordure verte 1s) pour être sûr que ça a marché,
-            # au lieu de ne rien afficher comme avant.
             url = club_links.get(club)
+            if url:
+                c8.link_button("🔗", url, use_container_width=True)
+            else:
+                c8.caption("—")
+
             tokens_floor = int(tokens_val)
-            label = f"🔗 {tokens_floor}" if url else f"📋 {tokens_floor}"
-            open_js = f"window.open({url!r}, '_blank');" if url else ""
-            title = (
-                f"Copie {tokens_floor} et ouvre la page Socios de {club}"
-                if url else f"Copie {tokens_floor} dans le presse-papier"
-            )
-            c8.markdown(
-                f'''<button onclick="
-                        navigator.clipboard.writeText('{tokens_floor}').then(() => {{
-                            this.style.borderColor = '#22c55e';
-                            this.dataset.origLabel = this.dataset.origLabel || this.textContent;
-                            this.textContent = '✅ Copié';
-                            setTimeout(() => {{
-                                this.style.borderColor = '#f107a3';
-                                this.textContent = this.dataset.origLabel;
-                            }}, 900);
-                        }}).catch(() => {{
-                            this.style.borderColor = '#ef4444';
-                            this.textContent = '⚠️ Échec copie';
-                            setTimeout(() => {{ this.style.borderColor = '#f107a3'; this.textContent = this.dataset.origLabel || '{label}'; }}, 1500);
-                        }});
-                        {open_js}
-                    "
+            c9.markdown(
+                f'''<button onclick="navigator.clipboard.writeText('{tokens_floor}')"
                     style="background-color:#1a1d29;color:#f5f6fa;border:1px solid #f107a3;
-                    border-radius:6px;padding:0.4rem 0.5rem;cursor:pointer;width:100%;
-                    font-size:0.8rem;transition:border-color 0.2s;" title="{title}">
-                    {label}</button>''',
+                    border-radius:6px;padding:0.4rem 0.3rem;cursor:pointer;width:100%;
+                    font-size:0.8rem;" title="Copier {tokens_floor} dans le presse-papier">
+                    📋 {tokens_floor}</button>''',
                 unsafe_allow_html=True,
             )
 
