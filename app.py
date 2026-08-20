@@ -386,7 +386,7 @@ with tab_dashboard:
                     storage.save_manual_price(edited_df.loc[i, "Club"], float(new_price), devise)
                     changed += 1
             if changed:
-                st.rerun()  # rerun complet nécessaire : le prix impacte d'autres onglets
+                st.rerun(scope="app")  # rerun complet nécessaire : le prix impacte d'autres onglets
             else:
                 st.toast("Aucun prix modifié.", icon="ℹ️")
 
@@ -598,7 +598,14 @@ with tab_history:
         st.info("Aucun historique pour l'instant.")
     else:
         hist_df = pd.DataFrame([dict(r) for r in all_entries])
-        hist_df["rendement_par_token"] = hist_df["points_per_day"] / hist_df["tokens_qty"]
+        # Rendement en équivalent "points/jour pour ton capital", pas juste par token
+        # (brut par token = illisible, les échelles varient trop d'un club à l'autre).
+        hist_df["rendement_capital"] = hist_df.apply(
+            lambda r: (r["points_per_day"] / r["tokens_qty"]) * (capital / r["price_at_entry"])
+            if r.get("price_at_entry") and r["price_at_entry"] > 0 else None,
+            axis=1,
+        )
+        hist_df = hist_df.dropna(subset=["rendement_capital"])
         clubs = sorted(hist_df["club"].unique())
 
         @st.fragment
@@ -606,19 +613,19 @@ with tab_history:
             chosen = st.multiselect("Clubs à afficher", clubs, default=clubs[: min(5, len(clubs))])
             if chosen:
                 plot_df = hist_df[hist_df["club"].isin(chosen)][
-                    ["entry_date", "club", "rendement_par_token"]
+                    ["entry_date", "club", "rendement_capital"]
                 ].sort_values("entry_date")
                 # Points + lignes (visible même avec une seule date par club, contrairement
                 # à st.line_chart qui n'affiche rien s'il n'y a qu'un point).
                 import altair as alt
                 base = alt.Chart(plot_df).encode(
                     x=alt.X("entry_date:N", title="Date"),
-                    y=alt.Y("rendement_par_token:Q", title="Points / token / jour"),
+                    y=alt.Y("rendement_capital:Q", title=f"Points/jour pour {capital:.0f}{devise.upper()}"),
                     color=alt.Color("club:N", title="Club"),
                 )
                 chart = (base.mark_line(point=True) + base.mark_point(size=60)).properties(height=380)
                 st.altair_chart(chart, use_container_width=True)
-                st.caption("Points de récompense par token et par jour, au fil de tes saisies.")
+                st.caption(f"Points de récompense par jour, pour l'équivalent de {capital:.0f}{devise.upper()} investis (au prix du token à la date de chaque saisie).")
             else:
                 st.info("Sélectionne au moins un club pour afficher le graphique.")
 
