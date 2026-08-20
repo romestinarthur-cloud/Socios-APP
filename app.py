@@ -160,28 +160,12 @@ st.markdown(
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600, show_spinner="Récupération des clubs sur socios.com...")
-def _fetch_teams_cached():
-    """Scraping en direct de socios.com : la partie VRAIMENT coûteuse (requête
-    réseau + parsing HTML), mise en cache 1h. Uniquement invalidée par le
-    bouton "🔄 Rafraîchir clubs & prix" — surtout PAS par "Vérifier" ou
-    "Ajouter un club", qui ne touchent que la table extra_clubs (fusionnée
-    par load_teams ci-dessous à chaque appel, sans passer par ce cache)."""
-    return get_teams()
-
-
 def load_teams():
-    """Fusionne les clubs scrapés (cache 1h, cf. _fetch_teams_cached) avec les
-    clubs/logos ajoutés à la main (table extra_clubs, relue à chaque appel —
-    peu coûteux, une seule petite requête DB, pas besoin de cache).
-    Avant, toute cette fusion était DANS la fonction mise en cache : corriger
-    un slug ("Vérifier") ou ajouter un club obligeait à vider le cache en
-    entier pour que le nouveau logo apparaisse, ce qui déclenchait un
-    RE-SCRAPING COMPLET de socios.com (plusieurs secondes) à chaque clic.
-    En sortant la fusion du cache, "Vérifier"/"Ajouter" prennent effet
-    immédiatement sans jamais retoucher au scraping."""
-    teams, live_ok = _fetch_teams_cached()
-    # Copie : ne pas modifier en place la liste renvoyée par le cache.
-    teams = [dict(t) for t in teams]
+    teams, live_ok = get_teams()
+    # extra : clubs ajoutés à la main (manqués par le scraping socios.com) OU
+    # logos récupérés depuis fantokens.com au moment du "Vérifier" — table
+    # réutilisée pour les deux cas : elle sert de SURCOUCHE de logo, qu'un
+    # club vienne du scraping ou non.
     extra = storage.get_extra_clubs()
     if extra:
         existing_names = {t["name"] for t in teams}
@@ -337,7 +321,7 @@ capital = st.sidebar.number_input("Capital de référence (€)", min_value=1.0,
 devise = st.sidebar.selectbox("Devise", ["eur", "usd"], index=0)
 
 if st.sidebar.button("🔄 Rafraîchir clubs & prix"):
-    _fetch_teams_cached.clear()
+    load_teams.clear()
     load_fx_rate.clear()
     load_single_price.clear()
     st.rerun()
@@ -618,18 +602,20 @@ with tab_mapping:
                 st.toast(f"Erreur réseau : {e}", icon="⚠️")
                 found = None
             if found:
-                # Une seule transaction (un seul aller-retour réseau vers la
-                # base) au lieu de 3-4 commits séparés : enregistre le slug,
-                # lève le flag "aucun token", nettoie l'éventuel prix de
-                # secours saisi à la main entre-temps (maintenant qu'un prix
+                storage.save_mapping(club, new_slug)
+                storage.save_no_token_flag(club, False)
+                # Nettoie l'éventuel prix saisi à la main entre-temps (le
+                # temps que le slug soit cassé) : maintenant qu'un prix
                 # automatique est retrouvé, il doit reprendre la main, sinon
-                # l'ancien prix manuel continue de tout écraser pour toujours
-                # et le compteur "Prix manuels" ne redescend jamais), et
-                # enregistre le logo trouvé sur fantokens.com s'il y en a un.
-                # Pas besoin de load_teams.clear() : load_teams relit
-                # extra_clubs à chaque appel, le nouveau logo apparaît donc
-                # dès le prochain rerun sans re-scraper socios.com.
-                storage.confirm_verification(club, new_slug, found.get("logo"))
+                # l'ancien prix manuel continue de tout écraser pour
+                # toujours et le compteur "Prix manuels" ne redescend jamais.
+                storage.save_manual_price(club, None)
+                if found.get("logo"):
+                    # Le logo trouvé sur fantokens.com écrase celui de
+                    # socios.com/seed (cf. load_teams) — plus besoin de le
+                    # chercher/coller à la main.
+                    storage.save_extra_club(club, found["logo"])
+                load_teams.clear()
                 st.toast(f'Trouvé : {found["name"]} — ${found["price_usd"]:.5f}. Enregistré.', icon="✅")
                 st.rerun()
             else:
@@ -650,14 +636,6 @@ with tab_mapping:
             if st.button("Enregistrer le lien", key=f"link_save_{club}"):
                 storage.save_club_link(club, new_link.strip() or None)
                 st.toast(f"Lien enregistré pour {club}." if new_link.strip() else f"Lien retiré pour {club}.", icon="🔗")
-                # Sans ce rerun, le nouveau lien restait invisible dans
-                # l'onglet Saisie (bouton "🔗 Ouvrir") : ce bouton est construit
-                # avec club_links, qui est lu une seule fois tout en haut du
-                # script — AVANT que ce clic n'ait lieu. Il fallait donc
-                # attendre une autre action ailleurs pour que le lien
-                # apparaisse. C'est le même schéma que "Vérifier" /
-                # "Aucun token" juste au-dessus : on force le rerun ici aussi.
-                st.rerun()
 
     st.divider()
     st.markdown("#### ➕ Ajouter un club manquant")
@@ -698,11 +676,9 @@ with tab_mapping:
                     )
                 else:
                     logo = found.get("logo")
-                    # Une seule transaction pour les deux écritures. Pas de
-                    # load_teams.clear() : load_teams relit extra_clubs à
-                    # chaque appel, le club apparaît dès le prochain rerun
-                    # sans re-scraper socios.com.
-                    storage.add_manual_club(name, slug, logo or SOCIOS_LOGO_URL)
+                    storage.save_extra_club(name, logo or SOCIOS_LOGO_URL)
+                    storage.save_mapping(name, slug)
+                    load_teams.clear()
                     if logo:
                         st.success(f"« {name} » ajouté avec son logo et son prix ({slug}).")
                     else:
