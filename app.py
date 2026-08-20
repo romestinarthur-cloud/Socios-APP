@@ -431,11 +431,14 @@ with tab_dashboard:
         except Exception:
             return 99999
 
+    club_links = storage.get_club_links()
+
     input_rows = matched_df[["name", "price", "tokens_pour_capital"]].copy()
     input_rows["_days"] = input_rows["name"].apply(_days_since)
     input_rows["Dernière saisie"] = input_rows["_days"].apply(
         lambda d: "Jamais" if d >= 99999 else ("Aujourd'hui" if d == 0 else f"Il y a {d} j")
     )
+    input_rows["Lien"] = input_rows["name"].map(club_links)
     # Ordre alphabétique fixe (le tri par ancienneté changeait l'ordre de façon
     # déroutante d'une saisie à l'autre) — la colonne "Dernière saisie" suffit
     # pour repérer visuellement ceux à mettre à jour en premier.
@@ -457,9 +460,10 @@ with tab_dashboard:
                 "Prix": st.column_config.NumberColumn(disabled=True, format="%.5f"),
                 "Nb tokens": st.column_config.NumberColumn(disabled=True),
                 "Dernière saisie": st.column_config.TextColumn(disabled=True),
+                "Lien": st.column_config.LinkColumn("🔗 Socios", display_text="Ouvrir", width="small"),
                 "points_par_jour": st.column_config.NumberColumn("Points / jour", min_value=0.0, step=0.1),
             },
-            column_order=["Club", "Dernière saisie", "Prix", "Nb tokens", "points_par_jour"],
+            column_order=["Club", "Dernière saisie", "Lien", "Prix", "Nb tokens", "points_par_jour"],
             hide_index=True,
             use_container_width=True,
             key="input_table",
@@ -500,6 +504,7 @@ with tab_mapping:
 
     saved_mappings = storage.get_saved_mappings()
     no_token_flags = storage.get_no_token_flags()
+    club_links = storage.get_club_links()
 
     for _, row in df.iterrows():
         club = row["name"]
@@ -528,6 +533,15 @@ with tab_mapping:
             storage.save_no_token_flag(club, False)
             storage.save_mapping(club, new_id)
             st.rerun()
+
+        with st.expander(f"🔗 Lien direct vers la page Socios de {club}"):
+            new_link = st.text_input(
+                "URL", value=club_links.get(club, ""), key=f"link_{club}",
+                placeholder="https://www.socios.com/...", label_visibility="collapsed",
+            )
+            if st.button("Enregistrer le lien", key=f"link_save_{club}"):
+                storage.save_club_link(club, new_link.strip() or None)
+                st.toast(f"Lien enregistré pour {club}." if new_link.strip() else f"Lien retiré pour {club}.", icon="🔗")
 
 # ---------------------------------------------------------------------------
 # Tab 3 : classement
