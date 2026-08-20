@@ -610,14 +610,6 @@ with tab_history:
         st.info("Aucun historique pour l'instant.")
     else:
         hist_df = pd.DataFrame([dict(r) for r in all_entries])
-        # Rendement en équivalent "points/jour pour ton capital", pas juste par token
-        # (brut par token = illisible, les échelles varient trop d'un club à l'autre).
-        hist_df["rendement_capital"] = hist_df.apply(
-            lambda r: (r["points_per_day"] / r["tokens_qty"]) * (capital / r["price_at_entry"])
-            if r.get("price_at_entry") and r["price_at_entry"] > 0 else None,
-            axis=1,
-        )
-        hist_df = hist_df.dropna(subset=["rendement_capital"])
         clubs = sorted(hist_df["club"].unique())
 
         @st.fragment
@@ -625,19 +617,19 @@ with tab_history:
             chosen = st.multiselect("Clubs à afficher", clubs, default=clubs[: min(5, len(clubs))])
             if chosen:
                 plot_df = hist_df[hist_df["club"].isin(chosen)][
-                    ["entry_date", "club", "rendement_capital"]
+                    ["entry_date", "club", "points_per_day"]
                 ].sort_values("entry_date")
                 # Points + lignes (visible même avec une seule date par club, contrairement
                 # à st.line_chart qui n'affiche rien s'il n'y a qu'un point).
                 import altair as alt
                 base = alt.Chart(plot_df).encode(
                     x=alt.X("entry_date:N", title="Date"),
-                    y=alt.Y("rendement_capital:Q", title=f"Points/jour pour {capital:.0f}{devise.upper()}"),
+                    y=alt.Y("points_per_day:Q", title="Points / jour saisis"),
                     color=alt.Color("club:N", title="Club"),
                 )
                 chart = (base.mark_line(point=True) + base.mark_point(size=60)).properties(height=380)
                 st.altair_chart(chart, use_container_width=True)
-                st.caption(f"Points de récompense par jour, pour l'équivalent de {capital:.0f}{devise.upper()} investis (au prix du token à la date de chaque saisie).")
+                st.caption("Points de récompense par jour tels que tu les as saisis, sans recalcul.")
             else:
                 st.info("Sélectionne au moins un club pour afficher le graphique.")
 
