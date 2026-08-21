@@ -4,6 +4,7 @@ import streamlit.components.v1 as components
 from datetime import datetime
 
 import storage
+import auth
 from teams_scraper import get_teams
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from prices import guess_slug, fetch_usd_to_eur_rate, fetch_fantoken_page
@@ -13,7 +14,6 @@ SOCIOS_LOGO_URL = "https://logowik.com/content/uploads/images/socioscom4620.jpg"
 st.set_page_config(page_title="Socios – Rendement des Fan Tokens", page_icon="⚽", layout="wide")
 
 storage.init_db()
-
 st.markdown(
     """
     <style>
@@ -154,6 +154,9 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+auth.require_login()
+
 
 # ---------------------------------------------------------------------------
 # Chargement des données (cache 1h pour ne pas spammer socios.com / CoinGecko)
