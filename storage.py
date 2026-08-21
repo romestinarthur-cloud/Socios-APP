@@ -14,6 +14,9 @@ appel, ce qui évite plusieurs secondes de latence à chaque interaction.
 import streamlit as st
 import psycopg2
 import psycopg2.extras
+import hashlib
+import hmac
+import os
 from datetime import datetime
 
 MAPPING_TABLE = "club_token_mapping"
@@ -23,6 +26,7 @@ NO_TOKEN_TABLE = "no_token_flags"
 RANK_SNAPSHOT_TABLE = "rank_snapshot"
 CLUB_LINKS_TABLE = "club_links"
 EXTRA_CLUBS_TABLE = "extra_clubs"
+APP_USERS_TABLE = "app_users"
 
 
 @st.cache_resource(show_spinner=False)
@@ -118,6 +122,106 @@ def init_db():
         )
         """
     )
+    cur.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {APP_USERS_TABLE} (
+            username TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    cur.close()
+
+    _ensure_bootstrap_admin()
+
+
+# ---------------------------------------------------------------------------
+# Authentification
+# ---------------------------------------------------------------------------
+
+def _hash_password(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt.encode("utf-8"), 200_000
+    ).hex()
+
+
+def _ensure_bootstrap_admin():
+    """Crée le compte super admin au premier lancement, à partir des
+    identifiants définis dans les Secrets Streamlit (ADMIN_USERNAME /
+    ADMIN_PASSWORD). Ne fait rien si un utilisateur existe déjà, ou si les
+    secrets ne sont pas configurés."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(f"SELECT COUNT(*) FROM {APP_USERS_TABLE}")
+    (count,) = cur.fetchone()
+    cur.close()
+    if count > 0:
+        return
+
+    admin_user = st.secrets.get("ADMIN_USERNAME")
+    admin_pass = st.secrets.get("ADMIN_PASSWORD")
+    if not admin_user or not admin_pass:
+        return
+    create_user(admin_user, admin_pass, is_admin=True)
+
+
+def create_user(username: str, password: str, is_admin: bool = False):
+    salt = os.urandom(16).hex()
+    pw_hash = _hash_password(password, salt)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        f"""INSERT INTO {APP_USERS_TABLE} (username, password_hash, salt, is_admin, created_at)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (username) DO UPDATE SET
+                password_hash = EXCLUDED.password_hash,
+                salt = EXCLUDED.salt,
+                is_admin = EXCLUDED.is_admin""",
+        (username.strip(), pw_hash, salt, is_admin, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    cur.close()
+
+
+def verify_user(username: str, password: str):
+    """Retourne {"username": ..., "is_admin": ...} si les identifiants sont
+    corrects, sinon None."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT password_hash, salt, is_admin FROM {APP_USERS_TABLE} WHERE username = %s",
+        (username.strip(),),
+    )
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return None
+    stored_hash, salt, is_admin = row
+    candidate_hash = _hash_password(password, salt)
+    if hmac.compare_digest(candidate_hash, stored_hash):
+        return {"username": username.strip(), "is_admin": bool(is_admin)}
+    return None
+
+
+def list_users():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT username, is_admin, created_at FROM {APP_USERS_TABLE} ORDER BY created_at"
+    )
+    rows = cur.fetchall()
+    cur.close()
+    return [{"username": r[0], "is_admin": bool(r[1]), "created_at": r[2]} for r in rows]
+
+
+def delete_user(username: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(f"DELETE FROM {APP_USERS_TABLE} WHERE username = %s", (username.strip(),))
     conn.commit()
     cur.close()
 
