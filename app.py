@@ -440,6 +440,14 @@ with tab_dashboard:
                     if price_val > 0:
                         storage.save_manual_price(row["name"], price_val, devise, is_fallback=True)
                         storage.save_no_token_flag(row["name"], True)
+                        # Le club peut aussi apparaître dans le tableau du bas
+                        # (car "matched" devient True) : ce tableau a son propre
+                        # champ Prix avec la clé price_{club}, qui garde en
+                        # mémoire l'ANCIENNE valeur tant qu'on ne la vide pas
+                        # explicitement (Streamlit ignore "value=" une fois le
+                        # widget déjà initialisé). Sans ce reset, le nouveau
+                        # prix ne serait jamais reporté en bas.
+                        st.session_state.pop(f"price_{row['name']}", None)
                         st.rerun()
                     else:
                         st.toast("Entre un prix supérieur à 0 avant d'enregistrer.", icon="⚠️")
@@ -633,6 +641,7 @@ with tab_mapping:
                 # extra_clubs à chaque appel, le nouveau logo apparaît donc
                 # dès le prochain rerun sans re-scraper socios.com.
                 storage.confirm_verification(club, new_slug, found.get("logo"))
+                st.session_state.pop(f"price_{club}", None)
                 st.toast(f'Trouvé : {found["name"]} — ${found["price_usd"]:.5f}. Enregistré.', icon="✅")
                 st.rerun()
             else:
@@ -643,6 +652,7 @@ with tab_mapping:
             storage.save_no_token_flag(club, flag_now)
             if flag_now:
                 storage.save_mapping(club, None)
+            st.session_state.pop(f"price_{club}", None)
             st.rerun()
 
         with st.expander(f"🔗 Lien direct vers la page Socios de {club}"):
