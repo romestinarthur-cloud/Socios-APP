@@ -142,6 +142,27 @@ def init_db():
     )
     cur.execute(
         f"""
+        CREATE TABLE IF NOT EXISTS {PORTFOLIO_TABLE} (
+            club TEXT PRIMARY KEY,
+            tokens_qty REAL NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {PORTFOLIO_HISTORY_TABLE} (
+            id SERIAL PRIMARY KEY,
+            club TEXT NOT NULL,
+            entry_date TEXT NOT NULL,
+            points_earned REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (club, entry_date)
+        )
+        """
+    )
+    cur.execute(
+        f"""
         CREATE TABLE IF NOT EXISTS {APP_USERS_TABLE} (
             username TEXT PRIMARY KEY,
             password_hash TEXT NOT NULL,
@@ -291,6 +312,100 @@ def add_entries_bulk(entries: list[dict]):
             VALUES %s""",
         values,
     )
+    conn.commit()
+    cur.close()
+
+
+# ---------------------------------------------------------------------------
+# Portefeuille réel : tokens réellement détenus + points gagnés/jour saisis
+# à la main (indépendant de la simulation "pour X€" de la table entries).
+# ---------------------------------------------------------------------------
+
+def get_portfolio_holdings() -> dict:
+    """club -> quantité de tokens réellement détenue."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(f"SELECT club, tokens_qty FROM {PORTFOLIO_TABLE}")
+    rows = cur.fetchall()
+    cur.close()
+    return {r["club"]: r["tokens_qty"] for r in rows}
+
+
+def set_portfolio_holding(club: str, tokens_qty: float):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        f"""INSERT INTO {PORTFOLIO_TABLE} (club, tokens_qty, updated_at)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (club) DO UPDATE SET tokens_qty = EXCLUDED.tokens_qty,
+                                              updated_at = EXCLUDED.updated_at""",
+        (club, tokens_qty, datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    cur.close()
+
+
+def delete_portfolio_holding(club: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(f"DELETE FROM {PORTFOLIO_TABLE} WHERE club = %s", (club,))
+    cur.execute(f"DELETE FROM {PORTFOLIO_HISTORY_TABLE} WHERE club = %s", (club,))
+    conn.commit()
+    cur.close()
+
+
+def upsert_portfolio_daily_points(club: str, entry_date: str, points_earned: float):
+    """Une seule ligne par (club, date) : ressaisir le même jour met à jour
+    au lieu de dupliquer."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        f"""INSERT INTO {PORTFOLIO_HISTORY_TABLE} (club, entry_date, points_earned, created_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (club, entry_date) DO UPDATE SET points_earned = EXCLUDED.points_earned,
+                                                           created_at = EXCLUDED.created_at""",
+        (club, entry_date, points_earned, datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    cur.close()
+
+
+def get_portfolio_history(club: str | None = None) -> list[dict]:
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    if club:
+        cur.execute(
+            f"SELECT * FROM {PORTFOLIO_HISTORY_TABLE} WHERE club = %s ORDER BY entry_date ASC",
+            (club,),
+        )
+    else:
+        cur.execute(f"SELECT * FROM {PORTFOLIO_HISTORY_TABLE} ORDER BY entry_date ASC, club ASC")
+    rows = cur.fetchall()
+    cur.close()
+    return [dict(r) for r in rows]
+
+
+def get_portfolio_latest_points() -> dict:
+    """club -> derniers points/jour saisis (pour l'affichage rapide)."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        f"""
+        SELECT h.* FROM {PORTFOLIO_HISTORY_TABLE} h
+        INNER JOIN (
+            SELECT club, MAX(entry_date) AS max_date FROM {PORTFOLIO_HISTORY_TABLE} GROUP BY club
+        ) latest ON h.club = latest.club AND h.entry_date = latest.max_date
+        """
+    )
+    rows = cur.fetchall()
+    cur.close()
+    return {r["club"]: dict(r) for r in rows}
+
+
+def delete_portfolio_entry(entry_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(f"DELETE FROM {PORTFOLIO_HISTORY_TABLE} WHERE id = %s", (entry_id,))
     conn.commit()
     cur.close()
 
