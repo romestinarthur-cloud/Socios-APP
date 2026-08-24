@@ -232,7 +232,7 @@ def load_prices(club_slugs: dict, vs_currency: str) -> dict:
     if not items:
         return {}
     results = {}
-    with ThreadPoolExecutor(max_workers=min(12, len(items))) as executor:
+    with ThreadPoolExecutor(max_workers=min(24, len(items))) as executor:
         future_to_club = {
             executor.submit(load_single_price, club, slug, vs_currency, fx_rate): club
             for club, slug in items
@@ -301,6 +301,7 @@ def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
         manual = manual_prices.get(club)
         row["needs_currency_reentry"] = False
         auto_price_available = row["matched"]  # avant override manuel, cf. ci-dessus
+        row["auto_matched"] = auto_price_available  # gardé pour is_fallback plus bas
         if manual is not None and manual.get("price") is not None:
             # Un prix "de secours" (tapé faute de prix auto) doit céder la
             # place dès qu'un prix automatique redevient disponible pour ce
@@ -411,55 +412,18 @@ tab_dashboard, tab_mapping, tab_ranking, tab_history, tab_portfolio = st.tabs(
 # ---------------------------------------------------------------------------
 
 with tab_dashboard:
-    no_token_flags = st.session_state.get("_no_token_flags", set())
-    # Un club reste dans cette zone de saisie tant qu'il est marqué "aucun token
-    # trouvé" (même après avoir déjà un prix), tant que sa devise saisie ne
-    # correspond plus à la devise active, ou tant qu'il n'a toujours aucun prix
-    # (slug fantokens.com introuvable).
-    unmatched_df = df[(~df["matched"]) | (df["name"].isin(no_token_flags))].sort_values("name")
-
-    if not unmatched_df.empty:
-        st.markdown('<div class="manual-zone">', unsafe_allow_html=True)
-        st.markdown(f"#### 🛠️ {len(unmatched_df)} club(s) en saisie manuelle")
+    n_no_price = int((~df["matched"]).sum())
+    if n_no_price:
         st.caption(
-            "Clubs sans prix trouvé sur fantokens.com (slug introuvable — corrige-le dans "
-            "l'onglet Correspondances), ou marqués « aucun token » à la main. Ils "
-            "réapparaissent dans le tableau principal dès qu'un prix est enregistré."
+            f"⚠️ {n_no_price} club(s) sans prix trouvé automatiquement sur fantokens.com "
+            "(repérables ci-dessous, fond légèrement teinté) — corrige le slug dans l'onglet "
+            "Correspondances, ou tape directement un prix dans le tableau et Enregistre."
         )
-        for _, row in unmatched_df.iterrows():
-            with st.form(key=f"quick_form_{row['name']}", border=False):
-                c1, c2, c3, c4 = st.columns([0.6, 2.5, 2, 1.2], vertical_alignment="center")
-                c1.image(row["logo"], width=32)
-                label = row["name"]
-                if row.get("needs_currency_reentry"):
-                    label += " ⚠️ (devise changée, prix à ressaisir)"
-                c2.markdown(f"**{label}**")
-                current_price = row["price"] if row.get("is_manual") and pd.notna(row["price"]) else 0.0
-                price_val = c3.number_input(
-                    f"Prix ({devise.upper()})", min_value=0.0, step=0.001, format="%.5f",
-                    value=float(current_price),
-                    key=f"quick_price_{row['name']}", label_visibility="collapsed",
-                )
-                btn_label = "💾 Mettre à jour" if row.get("is_manual") else "💾 Ajouter"
-                submitted = c4.form_submit_button(btn_label, use_container_width=True)
-                if submitted:
-                    if price_val > 0:
-                        storage.save_manual_price(row["name"], price_val, devise, is_fallback=True)
-                        storage.save_no_token_flag(row["name"], True)
-                        # Le club peut aussi apparaître dans le tableau du bas
-                        # (car "matched" devient True) : ce tableau a son propre
-                        # champ Prix avec la clé price_{club}, qui garde en
-                        # mémoire l'ANCIENNE valeur tant qu'on ne la vide pas
-                        # explicitement (Streamlit ignore "value=" une fois le
-                        # widget déjà initialisé). Sans ce reset, le nouveau
-                        # prix ne serait jamais reporté en bas.
-                        st.session_state.pop(f"price_{row['name']}", None)
-                        st.rerun()
-                    else:
-                        st.toast("Entre un prix supérieur à 0 avant d'enregistrer.", icon="⚠️")
-        st.markdown('</div>', unsafe_allow_html=True)
 
-    matched_df = df[df["matched"]].copy().sort_values("name").reset_index(drop=True)
+    # Une seule et même table pour tous les clubs (prix trouvé ou pas) : le
+    # champ Prix qu'on édite ici EST le champ Prix affiché, il n'y a plus de
+    # zone de saisie séparée avec sa propre clé de widget à resynchroniser.
+    matched_df = df.copy().sort_values("name").reset_index(drop=True)
 
     st.subheader(f"Pour {capital:.0f} {devise.upper()} investis")
     st.caption(
@@ -497,7 +461,10 @@ with tab_dashboard:
                 [0.6, 2.1, 1.2, 0.9, 1.3, 1.2, 1.1, 1.3]
             )
             c1.image(row["logo"], width=30)
-            c2.write(club)
+            label = club
+            if not row["matched"]:
+                label += " ⚠️" + (" devise à ressaisir" if row.get("needs_currency_reentry") else " pas de prix trouvé")
+            c2.write(label)
 
             price_val = c3.number_input(
                 "Prix", min_value=0.0, step=0.001, format="%.5f",
@@ -563,7 +530,13 @@ with tab_dashboard:
                 new_price = st.session_state.get(f"price_{club}")
                 old_price = float(row["price"]) if pd.notna(row["price"]) else None
                 if new_price and new_price > 0 and (old_price is None or abs(new_price - old_price) > 1e-9):
-                    storage.save_manual_price(club, float(new_price), devise)
+                    # is_fallback=True pour un club sans prix auto (le prix manuel
+                    # cédera la place dès qu'un prix auto redevient disponible),
+                    # False pour une correction volontaire d'un prix déjà trouvé
+                    # (reste prioritaire indéfiniment).
+                    storage.save_manual_price(
+                        club, float(new_price), devise, is_fallback=not row.get("auto_matched", False)
+                    )
                     price_changes += 1
 
                 pts = st.session_state.get(f"pts_{club}", 0.0)
