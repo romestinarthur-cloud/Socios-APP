@@ -266,7 +266,13 @@ def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
         club_slugs[club] = saved_mappings.get(club) or guess_slug(club)
 
     try:
-        price_data = load_prices(club_slugs, vs_currency)
+        # load_single_price est caché avec show_spinner=False (pour ne pas
+        # spammer un spinner par club) : sans ce spinner englobant, un
+        # premier chargement (cache vide/expiré) ne montre RIEN pendant
+        # plusieurs secondes, ce qui donne l'impression que l'appli est
+        # bloquée juste après le login.
+        with st.spinner("Récupération des prix sur fantokens.com..."):
+            price_data = load_prices(club_slugs, vs_currency)
         prices_ok = True
     except Exception as e:
         price_data = {}
@@ -396,8 +402,8 @@ for col, (value, label) in zip(st.columns(len(metrics)), metrics):
 
 st.write("")
 
-tab_dashboard, tab_mapping, tab_ranking, tab_history = st.tabs(
-    ["📋 Saisie", "🔗 Correspondances tokens", "🏆 Classement", "📈 Évolution"]
+tab_dashboard, tab_mapping, tab_ranking, tab_history, tab_portfolio = st.tabs(
+    ["📋 Saisie", "🔗 Correspondances tokens", "🏆 Classement", "📈 Évolution", "💼 Mon Portefeuille"]
 )
 
 # ---------------------------------------------------------------------------
@@ -922,4 +928,155 @@ with tab_history:
                 c4.write(f'{r["points_per_day"]} pts/j')
                 if c5.button("🗑️", key=f"del_{r['id']}"):
                     storage.delete_entry(r["id"])
+                    st.rerun()
+
+# ---------------------------------------------------------------------------
+# Tab 5 : mon portefeuille réel (tokens réellement détenus + points gagnés/jour)
+# ---------------------------------------------------------------------------
+
+with tab_portfolio:
+    st.subheader("💼 Mes tokens détenus")
+    st.caption(
+        "Indépendant du tableau « Saisie » ci-dessus (qui simule pour un capital de "
+        f"référence). Ici tu déclares ce que tu possèdes réellement, puis tu notes "
+        "chaque jour combien un token t'a rapporté (le rendement varie d'un jour à l'autre)."
+    )
+
+    all_club_names = sorted(df["name"].unique().tolist()) if not df.empty else []
+    holdings = storage.get_portfolio_holdings()
+    latest_points = storage.get_portfolio_latest_points()
+
+    @st.fragment
+    def _portfolio_holdings_fragment():
+        st.markdown("###### Ajouter / mettre à jour un token détenu")
+        c1, c2, c3 = st.columns([3, 1.5, 1])
+        club_choice = c1.selectbox(
+            "Club", all_club_names, key="_pf_add_club", label_visibility="collapsed",
+            placeholder="Choisir un club...", index=None,
+        )
+        qty_choice = c2.number_input(
+            "Quantité détenue", min_value=0.0, step=1.0, key="_pf_add_qty",
+            label_visibility="collapsed", placeholder="Quantité",
+        )
+        if c3.button("💾 Enregistrer", key="_pf_add_btn", use_container_width=True):
+            if club_choice and qty_choice > 0:
+                storage.set_portfolio_holding(club_choice, float(qty_choice))
+                st.success(f"{club_choice} : {qty_choice} tokens enregistrés.")
+                st.rerun(scope="fragment")
+            else:
+                st.toast("Choisis un club et une quantité supérieure à 0.", icon="⚠️")
+
+        if not holdings:
+            st.info("Aucun token ajouté pour l'instant.")
+            return
+
+        st.write("")
+        st.markdown("###### Points gagnés aujourd'hui, par token")
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        for club in sorted(holdings.keys()):
+            qty = holdings[club]
+            last = latest_points.get(club)
+            hc1, hc2, hc3, hc4, hc5 = st.columns([2.2, 1, 1.3, 1.3, 0.7])
+            hc1.write(f"**{club}**")
+            hc2.caption(f"{qty:g} tokens")
+            entry_date = hc3.date_input(
+                "Date", value=datetime.now().date(), key=f"_pf_date_{club}",
+                label_visibility="collapsed",
+            )
+            default_pts = last["points_earned"] if last and last["entry_date"] == entry_date.strftime("%Y-%m-%d") else 0.0
+            pts_val = hc4.number_input(
+                "Points gagnés", min_value=0.0, step=0.1, value=float(default_pts),
+                key=f"_pf_pts_{club}", label_visibility="collapsed",
+            )
+            if hc5.button("💾", key=f"_pf_save_{club}"):
+                storage.upsert_portfolio_daily_points(club, entry_date.strftime("%Y-%m-%d"), float(pts_val))
+                st.toast(f"{club} : {pts_val} points enregistrés pour le {entry_date.strftime('%d/%m/%Y')}.", icon="✅")
+                st.rerun(scope="fragment")
+            if last:
+                hc1.caption(f"Dernière saisie : {last['entry_date']} → {last['points_earned']} pts")
+
+        st.write("")
+        with st.expander("Retirer un token du portefeuille"):
+            for club in sorted(holdings.keys()):
+                rc1, rc2 = st.columns([4, 1])
+                rc1.write(f"{club} — {holdings[club]:g} tokens")
+                if rc2.button("🗑️", key=f"_pf_del_{club}"):
+                    storage.delete_portfolio_holding(club)
+                    st.rerun(scope="fragment")
+
+    _portfolio_holdings_fragment()
+
+    st.divider()
+    st.subheader("📊 Stats de staking")
+
+    pf_history = storage.get_portfolio_history()
+    if not pf_history:
+        st.info("Aucune saisie de points pour l'instant — ajoute des tokens et note leurs points/jour ci-dessus.")
+    else:
+        pf_df = pd.DataFrame(pf_history)
+        pf_clubs = sorted(pf_df["club"].unique())
+
+        totals_by_date = pf_df.groupby("entry_date")["points_earned"].sum().reset_index()
+        last_date = totals_by_date["entry_date"].max()
+        total_last_day = totals_by_date.loc[totals_by_date["entry_date"] == last_date, "points_earned"].sum()
+
+        mcol1, mcol2 = st.columns(2)
+        mcol1.markdown(
+            f'<div class="metric-card"><div class="value">{total_last_day:g}</div>'
+            f'<div class="label">Total points/jour ({last_date})</div></div>',
+            unsafe_allow_html=True,
+        )
+        mcol2.markdown(
+            f'<div class="metric-card"><div class="value">{len(pf_clubs)}</div>'
+            f'<div class="label">Tokens suivis</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.write("")
+
+        st.markdown("###### Total staké par jour (tous tokens confondus)")
+        import altair as alt
+        total_chart = alt.Chart(totals_by_date).encode(
+            x=alt.X("entry_date:N", title="Date"),
+            y=alt.Y("points_earned:Q", title="Total points/jour"),
+        )
+        st.altair_chart(
+            (total_chart.mark_line(point=True) + total_chart.mark_point(size=60)).properties(height=320),
+            use_container_width=True,
+        )
+
+        st.markdown("###### Évolution par token")
+
+        @st.fragment
+        def _portfolio_stats_fragment():
+            chosen_pf = st.multiselect(
+                "Tokens à afficher", pf_clubs, default=pf_clubs[: min(5, len(pf_clubs))],
+                key="_pf_stats_clubs",
+            )
+            if chosen_pf:
+                plot_pf = pf_df[pf_df["club"].isin(chosen_pf)][["entry_date", "club", "points_earned"]]
+                base = alt.Chart(plot_pf).encode(
+                    x=alt.X("entry_date:N", title="Date"),
+                    y=alt.Y("points_earned:Q", title="Points gagnés"),
+                    color=alt.Color("club:N", title="Token"),
+                )
+                chart = (base.mark_line(point=True) + base.mark_point(size=60)).properties(height=380)
+                st.altair_chart(chart, use_container_width=True)
+            else:
+                st.info("Sélectionne au moins un token pour afficher le graphique.")
+
+        _portfolio_stats_fragment()
+
+        with st.expander("Voir tout l'historique (supprimer une saisie)"):
+            hist_pf_df = pf_df[["id", "club", "entry_date", "points_earned"]].rename(columns={
+                "id": "ID", "club": "Token", "entry_date": "Date", "points_earned": "Points",
+            }).sort_values("Date", ascending=False)
+            st.dataframe(hist_pf_df, hide_index=True, use_container_width=True)
+            st.markdown("###### Supprimer une saisie")
+            for r in sorted(pf_history, key=lambda x: x["entry_date"], reverse=True):
+                dc1, dc2, dc3, dc4 = st.columns([2, 2, 2, 1])
+                dc1.write(r["club"])
+                dc2.write(r["entry_date"])
+                dc3.write(f'{r["points_earned"]} pts')
+                if dc4.button("🗑️", key=f"_pf_del_hist_{r['id']}"):
+                    storage.delete_portfolio_entry(r["id"])
                     st.rerun()
