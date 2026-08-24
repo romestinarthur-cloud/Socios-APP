@@ -939,12 +939,15 @@ with tab_portfolio:
     st.caption(
         "Indépendant du tableau « Saisie » ci-dessus (qui simule pour un capital de "
         f"référence). Ici tu déclares ce que tu possèdes réellement, puis tu notes "
-        "chaque jour combien un token t'a rapporté (le rendement varie d'un jour à l'autre)."
+        "chaque jour combien un token t'a rapporté (le rendement varie d'un jour à l'autre). "
+        "Ce portefeuille est **privé** : seul toi peux le voir et le modifier."
     )
 
+    _pf_username = st.session_state["auth_user"]["username"]
+
     all_club_names = sorted(df["name"].unique().tolist()) if not df.empty else []
-    holdings = storage.get_portfolio_holdings()
-    latest_points = storage.get_portfolio_latest_points()
+    holdings = storage.get_portfolio_holdings(_pf_username)
+    latest_points = storage.get_portfolio_latest_points(_pf_username)
 
     @st.fragment
     def _portfolio_holdings_fragment():
@@ -960,7 +963,7 @@ with tab_portfolio:
         )
         if c3.button("💾 Enregistrer", key="_pf_add_btn", use_container_width=True):
             if club_choice and qty_choice > 0:
-                storage.set_portfolio_holding(club_choice, float(qty_choice))
+                storage.set_portfolio_holding(_pf_username, club_choice, float(qty_choice))
                 st.success(f"{club_choice} : {qty_choice} tokens enregistrés.")
                 st.rerun(scope="fragment")
             else:
@@ -989,7 +992,7 @@ with tab_portfolio:
                 key=f"_pf_pts_{club}", label_visibility="collapsed",
             )
             if hc5.button("💾", key=f"_pf_save_{club}"):
-                storage.upsert_portfolio_daily_points(club, entry_date.strftime("%Y-%m-%d"), float(pts_val))
+                storage.upsert_portfolio_daily_points(_pf_username, club, entry_date.strftime("%Y-%m-%d"), float(pts_val))
                 st.toast(f"{club} : {pts_val} points enregistrés pour le {entry_date.strftime('%d/%m/%Y')}.", icon="✅")
                 st.rerun(scope="fragment")
             if last:
@@ -1001,7 +1004,7 @@ with tab_portfolio:
                 rc1, rc2 = st.columns([4, 1])
                 rc1.write(f"{club} — {holdings[club]:g} tokens")
                 if rc2.button("🗑️", key=f"_pf_del_{club}"):
-                    storage.delete_portfolio_holding(club)
+                    storage.delete_portfolio_holding(_pf_username, club)
                     st.rerun(scope="fragment")
 
     _portfolio_holdings_fragment()
@@ -1009,7 +1012,7 @@ with tab_portfolio:
     st.divider()
     st.subheader("📊 Stats de staking")
 
-    pf_history = storage.get_portfolio_history()
+    pf_history = storage.get_portfolio_history(_pf_username)
     if not pf_history:
         st.info("Aucune saisie de points pour l'instant — ajoute des tokens et note leurs points/jour ci-dessus.")
     else:
@@ -1078,5 +1081,5 @@ with tab_portfolio:
                 dc2.write(r["entry_date"])
                 dc3.write(f'{r["points_earned"]} pts')
                 if dc4.button("🗑️", key=f"_pf_del_hist_{r['id']}"):
-                    storage.delete_portfolio_entry(r["id"])
+                    storage.delete_portfolio_entry(_pf_username, r["id"])
                     st.rerun()
