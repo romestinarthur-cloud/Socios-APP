@@ -31,7 +31,11 @@ def _login_form():
             password = st.text_input("Mot de passe", type="password")
             submitted = st.form_submit_button("Se connecter", use_container_width=True)
         if submitted:
-            user = storage.verify_user(username, password)
+            # Retour visuel immédiat : sans ça, l'écran ne bouge pas pendant
+            # la vérification + le chargement complet de l'appli qui suit,
+            # et on croit que la touche Entrée / le clic n'a rien fait.
+            with st.spinner("Connexion..."):
+                user = storage.verify_user(username, password)
             if user:
                 st.session_state["auth_user"] = user
                 st.rerun()
