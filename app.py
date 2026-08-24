@@ -450,15 +450,12 @@ with tab_dashboard:
                     if price_val > 0:
                         storage.save_manual_price(row["name"], price_val, devise, is_fallback=True)
                         storage.save_no_token_flag(row["name"], True)
-                        # Le club reste ici EN PLUS d'apparaître dans le tableau du
-                        # bas (il devient "matched" dès que ce prix est enregistré).
-                        # Ce tableau du bas a son propre champ Prix, avec sa propre
-                        # clé de widget (price_{club}) : sans ce pop, Streamlit
-                        # garderait l'ANCIENNE valeur en mémoire pour ce widget tant
-                        # qu'on ne la vide pas explicitement ("value=" est ignoré une
-                        # fois le widget déjà initialisé) — c'est ce pop qui fait que
-                        # le nouveau prix se reporte bien en bas.
-                        st.session_state.pop(f"price_{row['name']}", None)
+                        # Pas besoin de vider un session_state ici : le champ Prix
+                        # du tableau du bas est désormais réengendré à chaque fois
+                        # que le prix change (sa clé de widget inclut la valeur du
+                        # prix, cf. price_{club}_{prix} plus bas) — un nouveau prix
+                        # = une nouvelle clé = un widget tout neuf avec la bonne
+                        # valeur, automatiquement.
                         st.rerun()
                     else:
                         st.toast("Entre un prix supérieur à 0 avant d'enregistrer.", icon="⚠️")
@@ -507,7 +504,14 @@ with tab_dashboard:
             price_val = c3.number_input(
                 "Prix", min_value=0.0, step=0.001, format="%.5f",
                 value=float(row["price"]) if pd.notna(row["price"]) else 0.0,
-                key=f"price_{club}", label_visibility="collapsed",
+                # La clé inclut le prix actuel (pas juste le club) : si ce prix
+                # change ailleurs (zone de saisie manuelle du haut, puis rerun
+                # complet), Streamlit voit une clé DIFFÉRENTE et recrée le
+                # widget avec la nouvelle valeur, au lieu de garder l'ancienne
+                # en mémoire indéfiniment. C'est ce qui manquait pour que le
+                # tableau du bas suive vraiment ce qui est saisi en haut.
+                key=f"price_{club}_{round(float(row['price']), 5) if pd.notna(row['price']) else 0}",
+                label_visibility="collapsed",
             )
 
             change = row.get("price_change_24h")
@@ -565,8 +569,9 @@ with tab_dashboard:
             entries_to_save = []
             for _, row in matched_df.iterrows():
                 club = row["name"]
-                new_price = st.session_state.get(f"price_{club}")
                 old_price = float(row["price"]) if pd.notna(row["price"]) else None
+                price_key = f"price_{club}_{round(old_price, 5) if old_price is not None else 0}"
+                new_price = st.session_state.get(price_key)
                 if new_price and new_price > 0 and (old_price is None or abs(new_price - old_price) > 1e-9):
                     # is_fallback=True pour un club sans prix auto (le prix manuel
                     # cédera la place dès qu'un prix auto redevient disponible),
@@ -658,7 +663,6 @@ with tab_mapping:
                 # extra_clubs à chaque appel, le nouveau logo apparaît donc
                 # dès le prochain rerun sans re-scraper socios.com.
                 storage.confirm_verification(club, new_slug, found.get("logo"))
-                st.session_state.pop(f"price_{club}", None)
                 st.toast(f'Trouvé : {found["name"]} — ${found["price_usd"]:.5f}. Enregistré.', icon="✅")
                 st.rerun()
             else:
@@ -669,7 +673,6 @@ with tab_mapping:
             storage.save_no_token_flag(club, flag_now)
             if flag_now:
                 storage.save_mapping(club, None)
-            st.session_state.pop(f"price_{club}", None)
             st.rerun()
 
         with st.expander(f"🔗 Lien direct vers la page Socios de {club}"):
@@ -985,29 +988,42 @@ with tab_portfolio:
             return
 
         st.write("")
-        st.markdown("###### Points gagnés aujourd'hui, par token")
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        st.markdown("###### Points gagnés par token")
+        pf_entry_date = st.date_input(
+            "Date de la saisie", value=datetime.now().date(), key="_pf_shared_date",
+        )
         for club in sorted(holdings.keys()):
             qty = holdings[club]
             last = latest_points.get(club)
-            hc1, hc2, hc3, hc4, hc5 = st.columns([2.2, 1, 1.3, 1.3, 0.7])
+            hc1, hc2, hc3 = st.columns([2.2, 1, 1.3])
             hc1.write(f"**{club}**")
             hc2.caption(f"{qty:g} tokens")
-            entry_date = hc3.date_input(
-                "Date", value=datetime.now().date(), key=f"_pf_date_{club}",
-                label_visibility="collapsed",
+            default_pts = (
+                last["points_earned"]
+                if last and last["entry_date"] == pf_entry_date.strftime("%Y-%m-%d")
+                else 0.0
             )
-            default_pts = last["points_earned"] if last and last["entry_date"] == entry_date.strftime("%Y-%m-%d") else 0.0
-            pts_val = hc4.number_input(
+            hc3.number_input(
                 "Points gagnés", min_value=0.0, step=0.1, value=float(default_pts),
-                key=f"_pf_pts_{club}", label_visibility="collapsed",
+                key=f"_pf_pts_{club}_{pf_entry_date.isoformat()}", label_visibility="collapsed",
             )
-            if hc5.button("💾", key=f"_pf_save_{club}"):
-                storage.upsert_portfolio_daily_points(_pf_username, club, entry_date.strftime("%Y-%m-%d"), float(pts_val))
-                st.toast(f"{club} : {pts_val} points enregistrés pour le {entry_date.strftime('%d/%m/%Y')}.", icon="✅")
-                st.rerun(scope="fragment")
             if last:
                 hc1.caption(f"Dernière saisie : {last['entry_date']} → {last['points_earned']} pts")
+
+        if st.button("💾 Enregistrer les points du jour", type="primary", key="_pf_save_all"):
+            saved = 0
+            for club in holdings.keys():
+                pts_val = st.session_state.get(f"_pf_pts_{club}_{pf_entry_date.isoformat()}", 0.0)
+                if pts_val and pts_val > 0:
+                    storage.upsert_portfolio_daily_points(
+                        _pf_username, club, pf_entry_date.strftime("%Y-%m-%d"), float(pts_val)
+                    )
+                    saved += 1
+            if saved:
+                st.success(f"{saved} token(s) enregistré(s) pour le {pf_entry_date.strftime('%d/%m/%Y')}.")
+                st.rerun(scope="fragment")
+            else:
+                st.toast("Aucun point à enregistrer (tous à 0).", icon="ℹ️")
 
         st.write("")
         with st.expander("Retirer un token du portefeuille"):
