@@ -200,14 +200,14 @@ def load_teams():
     return teams, live_ok
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_fx_rate(vs_currency: str) -> float:
     """Taux de change, mis en cache à part (change rarement, pas la peine
     de le redemander à chaque club)."""
     return fetch_usd_to_eur_rate() if vs_currency == "eur" else 1.0
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_single_price(club: str, slug: str, vs_currency: str, fx_rate: float):
     """Cache PAR CLUB (clé = club + slug + devise), pas un seul gros cache
     global. Résultat : vérifier/changer le slug d'UN club, ou cocher/décocher
@@ -412,18 +412,59 @@ tab_dashboard, tab_mapping, tab_ranking, tab_history, tab_portfolio = st.tabs(
 # ---------------------------------------------------------------------------
 
 with tab_dashboard:
-    n_no_price = int((~df["matched"]).sum())
-    if n_no_price:
-        st.caption(
-            f"⚠️ {n_no_price} club(s) sans prix trouvé automatiquement sur fantokens.com "
-            "(repérables ci-dessous, fond légèrement teinté) — corrige le slug dans l'onglet "
-            "Correspondances, ou tape directement un prix dans le tableau et Enregistre."
-        )
+    no_token_flags = st.session_state.get("_no_token_flags", set())
+    # Un club est ici tant qu'il n'a AUCUN prix (auto ou manuel), ou tant
+    # qu'il est explicitement marqué "aucun token" depuis l'onglet
+    # Correspondances. Dès qu'un prix est enregistré ici, "matched" passe à
+    # True (cf. build_dataframe) et le club bascule automatiquement dans le
+    # tableau du bas au rerun suivant — même case, mêmes infos, pas de
+    # doublon ni de désync.
+    unmatched_df = df[(~df["matched"]) | (df["name"].isin(no_token_flags))].sort_values("name")
 
-    # Une seule et même table pour tous les clubs (prix trouvé ou pas) : le
-    # champ Prix qu'on édite ici EST le champ Prix affiché, il n'y a plus de
-    # zone de saisie séparée avec sa propre clé de widget à resynchroniser.
-    matched_df = df.copy().sort_values("name").reset_index(drop=True)
+    if not unmatched_df.empty:
+        st.markdown('<div class="manual-zone">', unsafe_allow_html=True)
+        st.markdown(f"#### 🛠️ {len(unmatched_df)} club(s) en saisie manuelle")
+        st.caption(
+            "Clubs sans prix trouvé sur fantokens.com (slug introuvable — corrige-le dans "
+            "l'onglet Correspondances), ou marqués « aucun token » à la main. Une fois un prix "
+            "enregistré ici, il reste dans cette zone (pour pouvoir le corriger plus tard) ET "
+            "apparaît aussi dans le tableau principal juste en dessous."
+        )
+        for _, row in unmatched_df.iterrows():
+            with st.form(key=f"quick_form_{row['name']}", border=False):
+                c1, c2, c3, c4 = st.columns([0.6, 2.5, 2, 1.2], vertical_alignment="center")
+                c1.image(row["logo"], width=32)
+                label = row["name"]
+                if row.get("needs_currency_reentry"):
+                    label += " ⚠️ (devise changée, prix à ressaisir)"
+                c2.markdown(f"**{label}**")
+                current_price = row["price"] if row.get("is_manual") and pd.notna(row["price"]) else 0.0
+                price_val = c3.number_input(
+                    f"Prix ({devise.upper()})", min_value=0.0, step=0.001, format="%.5f",
+                    value=float(current_price),
+                    key=f"quick_price_{row['name']}", label_visibility="collapsed",
+                )
+                btn_label = "💾 Mettre à jour" if row.get("is_manual") else "💾 Ajouter"
+                submitted = c4.form_submit_button(btn_label, use_container_width=True)
+                if submitted:
+                    if price_val > 0:
+                        storage.save_manual_price(row["name"], price_val, devise, is_fallback=True)
+                        storage.save_no_token_flag(row["name"], True)
+                        # Le club reste ici EN PLUS d'apparaître dans le tableau du
+                        # bas (il devient "matched" dès que ce prix est enregistré).
+                        # Ce tableau du bas a son propre champ Prix, avec sa propre
+                        # clé de widget (price_{club}) : sans ce pop, Streamlit
+                        # garderait l'ANCIENNE valeur en mémoire pour ce widget tant
+                        # qu'on ne la vide pas explicitement ("value=" est ignoré une
+                        # fois le widget déjà initialisé) — c'est ce pop qui fait que
+                        # le nouveau prix se reporte bien en bas.
+                        st.session_state.pop(f"price_{row['name']}", None)
+                        st.rerun()
+                    else:
+                        st.toast("Entre un prix supérieur à 0 avant d'enregistrer.", icon="⚠️")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    matched_df = df[df["matched"]].copy().sort_values("name").reset_index(drop=True)
 
     st.subheader(f"Pour {capital:.0f} {devise.upper()} investis")
     st.caption(
@@ -461,10 +502,7 @@ with tab_dashboard:
                 [0.6, 2.1, 1.2, 0.9, 1.3, 1.2, 1.1, 1.3]
             )
             c1.image(row["logo"], width=30)
-            label = club
-            if not row["matched"]:
-                label += " ⚠️" + (" devise à ressaisir" if row.get("needs_currency_reentry") else " pas de prix trouvé")
-            c2.write(label)
+            c2.write(club)
 
             price_val = c3.number_input(
                 "Prix", min_value=0.0, step=0.001, format="%.5f",
