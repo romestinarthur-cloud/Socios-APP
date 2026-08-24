@@ -17,6 +17,7 @@ import psycopg2.extras
 import hashlib
 import hmac
 import os
+import time
 from datetime import datetime
 
 MAPPING_TABLE = "club_token_mapping"
@@ -27,6 +28,8 @@ RANK_SNAPSHOT_TABLE = "rank_snapshot"
 CLUB_LINKS_TABLE = "club_links"
 EXTRA_CLUBS_TABLE = "extra_clubs"
 APP_USERS_TABLE = "app_users"
+PORTFOLIO_TABLE = "portfolio_holdings"
+PORTFOLIO_HISTORY_TABLE = "portfolio_history"
 
 
 @st.cache_resource(show_spinner=False)
@@ -36,10 +39,25 @@ def _get_conn():
     return conn
 
 
+# Horodatage du dernier "ping" de santé de la connexion, en dehors de toute
+# fonction pour survivre aux reruns Streamlit (le process reste le même).
+_last_conn_check = {"t": 0.0}
+_CONN_CHECK_INTERVAL = 30  # secondes
+
+
 def get_conn():
     """Réutilise une connexion existante ; la reconnecte si elle a expiré
-    (Supabase peut fermer une connexion inactive après un moment)."""
+    (Supabase peut fermer une connexion inactive après un moment).
+
+    Le test de santé ("SELECT 1") ne coûtait rien en soi, mais comme il
+    tournait AVANT CHAQUE requête (get_conn est appelé par toutes les
+    fonctions de ce fichier), une page qui fait 15 requêtes faisait en
+    réalité 30 allers-retours réseau vers Supabase. On ne le fait donc plus
+    qu'au maximum une fois toutes les 30 secondes."""
     conn = _get_conn()
+    now = time.monotonic()
+    if now - _last_conn_check["t"] < _CONN_CHECK_INTERVAL:
+        return conn
     try:
         cur = conn.cursor()
         cur.execute("SELECT 1")
