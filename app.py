@@ -265,19 +265,37 @@ def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
         club = team["name"]
         club_slugs[club] = saved_mappings.get(club) or guess_slug(club)
 
-    try:
-        # load_single_price est caché avec show_spinner=False (pour ne pas
-        # spammer un spinner par club) : sans ce spinner englobant, un
-        # premier chargement (cache vide/expiré) ne montre RIEN pendant
-        # plusieurs secondes, ce qui donne l'impression que l'appli est
-        # bloquée juste après le login.
-        with st.spinner("Récupération des prix sur fantokens.com..."):
-            price_data = load_prices(club_slugs, vs_currency)
-        prices_ok = True
-    except Exception as e:
-        price_data = {}
-        prices_ok = False
-        st.session_state["_prices_error"] = str(e)
+    # Prix auto (fantokens.com) réutilisés depuis la session tant que la liste
+    # de clubs et la devise n'ont pas changé : sans ça, CHAQUE interaction (un
+    # simple prix corrigé à la main, un point/jour saisi...) déclenchait un
+    # rerun complet qui refaisait tourner load_prices pour TOUS les clubs —
+    # même si le cache Streamlit sous-jacent évitait le vrai appel réseau, le
+    # ré-orchestrer (spinner + pool de 100+ tâches) pour rien ralentissait et
+    # donnait l'impression de "tout re-télécharger" à chaque petite mise à
+    # jour. Ici, un prix manuel ne touche PAS aux prix auto : pas besoin de
+    # rappeler load_prices du tout pour que la mise à jour se voie.
+    price_cache_key = (vs_currency, tuple(sorted(club_slugs.items())))
+    cached_prices = st.session_state.get("_price_data_cache")
+    if cached_prices and cached_prices["key"] == price_cache_key:
+        price_data = cached_prices["data"]
+        prices_ok = cached_prices["ok"]
+    else:
+        try:
+            # load_single_price est caché avec show_spinner=False (pour ne pas
+            # spammer un spinner par club) : sans ce spinner englobant, un
+            # premier chargement (cache vide/expiré) ne montre RIEN pendant
+            # plusieurs secondes, ce qui donne l'impression que l'appli est
+            # bloquée juste après le login.
+            with st.spinner("Récupération des prix sur fantokens.com..."):
+                price_data = load_prices(club_slugs, vs_currency)
+            prices_ok = True
+        except Exception as e:
+            price_data = {}
+            prices_ok = False
+            st.session_state["_prices_error"] = str(e)
+        st.session_state["_price_data_cache"] = {
+            "key": price_cache_key, "data": price_data, "ok": prices_ok,
+        }
     st.session_state["_prices_ok"] = prices_ok
 
     enriched = []
@@ -350,6 +368,7 @@ if st.sidebar.button("🔄 Rafraîchir clubs & prix"):
     _fetch_teams_cached.clear()
     load_fx_rate.clear()
     load_single_price.clear()
+    st.session_state.pop("_price_data_cache", None)
     st.rerun()
 
 df = build_dataframe(capital, devise)
@@ -450,12 +469,13 @@ with tab_dashboard:
                     if price_val > 0:
                         storage.save_manual_price(row["name"], price_val, devise, is_fallback=True)
                         storage.save_no_token_flag(row["name"], True)
-                        # Pas besoin de vider un session_state ici : le champ Prix
-                        # du tableau du bas est désormais réengendré à chaque fois
-                        # que le prix change (sa clé de widget inclut la valeur du
-                        # prix, cf. price_{club}_{prix} plus bas) — un nouveau prix
-                        # = une nouvelle clé = un widget tout neuf avec la bonne
-                        # valeur, automatiquement.
+                        # Filet de sécurité en plus de la clé dynamique du champ
+                        # Prix en bas (price_{club}_{prix}) : on pré-remplit
+                        # nous-mêmes cette clé avec la valeur qu'on vient
+                        # d'enregistrer, pour être certain que le tableau du bas
+                        # l'affiche dès ce rerun, même si jamais un ancien
+                        # session_state traînait encore sous cette même clé.
+                        st.session_state[f"price_{row['name']}_{round(price_val, 5)}"] = price_val
                         st.rerun()
                     else:
                         st.toast("Entre un prix supérieur à 0 avant d'enregistrer.", icon="⚠️")
