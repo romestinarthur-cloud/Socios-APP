@@ -66,7 +66,7 @@ MANUAL_SLUG_OVERRIDES = {
 }
 
 
-def _get_with_retry(url: str, timeout: int = 15, retries: int = 2, params: dict | None = None):
+def _get_with_retry(url: str, timeout: int = 8, retries: int = 1, params: dict | None = None):
     """GET avec retry. Retourne None sur 404 (page/slug inexistant),
     lève une exception réseau après épuisement des tentatives."""
     last_exc = None
@@ -113,7 +113,7 @@ def _parse_fr_number(raw: str) -> float:
     return float(cleaned)
 
 
-def fetch_fantoken_page(slug: str, timeout: int = 15):
+def fetch_fantoken_page(slug: str, timeout: int = 8):
     """Scrape https://www.fantokens.com/fr/trade/<slug>.
     Retourne {"price_usd": float, "change_24h": float|None, "name": str,
     "logo": str|None} ou None si le slug n'existe pas (page 404) ou si le
