@@ -172,7 +172,7 @@ def _fetch_teams_cached():
     return get_teams()
 
 
-def load_teams():
+def load_teams(extra: dict):
     """Fusionne les clubs scrapés (cache 1h, cf. _fetch_teams_cached) avec les
     clubs/logos ajoutés à la main (table extra_clubs, relue à chaque appel —
     peu coûteux, une seule petite requête DB, pas besoin de cache).
@@ -185,7 +185,6 @@ def load_teams():
     teams, live_ok = _fetch_teams_cached()
     # Copie : ne pas modifier en place la liste renvoyée par le cache.
     teams = [dict(t) for t in teams]
-    extra = storage.get_extra_clubs()
     if extra:
         existing_names = {t["name"] for t in teams}
         # Écrase le logo des clubs déjà présents (ex : logo mieux trouvé sur
@@ -248,12 +247,11 @@ def load_prices(club_slugs: dict, vs_currency: str) -> dict:
     return results
 
 
-def build_dataframe(capital: float, vs_currency: str) -> pd.DataFrame:
-    teams, live_ok = load_teams()
-
-    saved_mappings = storage.get_saved_mappings()  # club -> slug fantokens.com (corrigé à la main)
-    no_token_flags = storage.get_no_token_flags()
-    manual_prices = storage.get_manual_prices()  # club -> {"price":..., "currency":...}
+def build_dataframe(
+    capital: float, vs_currency: str, extra_clubs: dict, saved_mappings: dict,
+    no_token_flags: set, manual_prices: dict,
+) -> pd.DataFrame:
+    teams, live_ok = load_teams(extra_clubs)
 
     # Slug à interroger pour chaque club — y compris ceux marqués "aucun
     # token" : on les filtre plus bas (ligne "if club in no_token_flags"),
@@ -371,7 +369,20 @@ if st.sidebar.button("🔄 Rafraîchir clubs & prix"):
     st.session_state.pop("_price_data_cache", None)
     st.rerun()
 
-df = build_dataframe(capital, devise)
+# Lectures DB partagées par plusieurs onglets : une seule fois par rerun au
+# lieu d'une fois par onglet qui en a besoin (get_saved_mappings,
+# get_no_token_flags et get_club_links étaient chacune redemandées deux fois
+# — build_dataframe/Saisie ET Correspondances —, get_latest_entry_per_club
+# l'était par Saisie ET Classement, get_extra_clubs par build_dataframe ET
+# Correspondances). Même valeur, une seule requête, réutilisée partout.
+extra_clubs = storage.get_extra_clubs()
+saved_mappings = storage.get_saved_mappings()  # club -> slug fantokens.com (corrigé à la main)
+no_token_flags = storage.get_no_token_flags()
+manual_prices = storage.get_manual_prices()  # club -> {"price":..., "currency":...}
+club_links = storage.get_club_links()
+latest_entries = storage.get_latest_entry_per_club()
+
+df = build_dataframe(capital, devise, extra_clubs, saved_mappings, no_token_flags, manual_prices)
 
 if not st.session_state.get("_live_ok", True):
     st.sidebar.warning(
@@ -431,7 +442,6 @@ tab_dashboard, tab_mapping, tab_ranking, tab_history, tab_portfolio = st.tabs(
 # ---------------------------------------------------------------------------
 
 with tab_dashboard:
-    no_token_flags = st.session_state.get("_no_token_flags", set())
     # Un club est ici tant qu'il n'a AUCUN prix (auto ou manuel), ou tant
     # qu'il est explicitement marqué "aucun token" depuis l'onglet
     # Correspondances. Dès qu'un prix est enregistré ici, "matched" passe à
@@ -490,8 +500,6 @@ with tab_dashboard:
         "(arrondi à l'entier inférieur) pour coller directement dans l'appli Socios."
     )
 
-    latest_entries = storage.get_latest_entry_per_club()
-    club_links = storage.get_club_links()
     today = datetime.now().date()
 
     def _days_since(club):
@@ -644,9 +652,6 @@ with tab_mapping:
         "ça correspond bien. Coche « aucun token » si le club n'a vraiment aucun "
         "Fan Token (le prix reste alors saisi à la main dans l'onglet Saisie)."
     )
-    saved_mappings = storage.get_saved_mappings()
-    no_token_flags = storage.get_no_token_flags()
-    club_links = storage.get_club_links()
 
     for _, row in df.iterrows():
         club = row["name"]
@@ -765,7 +770,6 @@ with tab_mapping:
                         )
                     st.rerun()
 
-    extra_clubs = storage.get_extra_clubs()
     if extra_clubs:
         st.caption("Clubs ajoutés à la main :")
         for name, logo in extra_clubs.items():
@@ -782,7 +786,7 @@ with tab_mapping:
 
 with tab_ranking:
     st.subheader("Classement des clubs les plus rentables")
-    latest = storage.get_latest_entry_per_club()
+    latest = latest_entries
 
     if not latest:
         st.info("Aucune saisie pour l'instant — va dans l'onglet **Saisie** pour commencer.")
@@ -980,11 +984,17 @@ with tab_portfolio:
     _pf_username = st.session_state["auth_user"]["username"]
 
     all_club_names = sorted(df["name"].unique().tolist()) if not df.empty else []
-    holdings = storage.get_portfolio_holdings(_pf_username)
-    latest_points = storage.get_portfolio_latest_points(_pf_username)
 
     @st.fragment
     def _portfolio_holdings_fragment():
+        # Lues ICI, à l'intérieur du fragment : un rerun scope="fragment" (plus
+        # rapide, ne recharge pas toute la page) ne réexécute QUE ce qui est
+        # dans cette fonction. Si holdings/latest_points étaient lues en
+        # dehors (comme avant), elles restaient figées sur leur ancienne
+        # valeur après un ajout tant qu'on ne rechargeait pas toute la page.
+        holdings = storage.get_portfolio_holdings(_pf_username)
+        latest_points = storage.get_portfolio_latest_points(_pf_username)
+
         st.markdown("###### Ajouter / mettre à jour un token détenu")
         c1, c2, c3 = st.columns([3, 1.5, 1])
         club_choice = c1.selectbox(
