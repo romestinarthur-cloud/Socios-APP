@@ -294,7 +294,14 @@ def build_dataframe(
         st.session_state["_price_data_cache"] = {
             "key": price_cache_key, "data": price_data, "ok": prices_ok,
         }
+        # Un vrai nouveau scraping vient d'avoir lieu : toute correction
+        # ponctuelle tapée dans le tableau du bas doit s'effacer ici, sinon
+        # elle resterait affichée indéfiniment au lieu de n'être qu'un
+        # dépannage "en attendant le prochain scraping".
+        st.session_state.pop("_price_overrides", None)
     st.session_state["_prices_ok"] = prices_ok
+
+    price_overrides = st.session_state.get("_price_overrides", {})
 
     enriched = []
     for team in teams:
@@ -331,6 +338,11 @@ def build_dataframe(
                 # échec réseau ponctuel pour ce club -> pas de prix tant que
                 # le slug n'est pas corrigé, ou que "aucun token" n'est coché.
                 row.update(matched=False, price=None, price_change_24h=None)
+            # Dépannage ponctuel (tableau du bas) : affiché tant que le
+            # prochain vrai scraping n'a pas eu lieu, cf. plus haut.
+            if club in price_overrides:
+                row["matched"] = True
+                row["price"] = price_overrides[club]
 
         enriched.append(row)
 
@@ -521,13 +533,20 @@ with tab_dashboard:
             c1.image(row["logo"], width=30)
             c2.write(club)
 
-            # Le prix n'est éditable QUE pour les clubs cochés "aucun token
-            # trouvé" (zone du haut) : pour tous les autres, le prix
-            # automatique de fantokens.com s'affiche en lecture seule — c'est
-            # ce qui empêche qu'un club se retrouve coincé en "correction
-            # manuelle" sans qu'on l'ait décidé.
-            price_val = float(row["price"]) if pd.notna(row["price"]) else 0.0
-            c3.write(f"{price_val:.5f}" if price_val else "—")
+            # Éditable seulement pour les clubs NON cochés "aucun token" (prix
+            # auto) : ceux cochés se modifient uniquement dans la zone du haut.
+            # La correction ici est un simple dépannage de session (voir plus
+            # haut) : elle s'efface toute seule au prochain vrai scraping.
+            display_price = float(row["price"]) if pd.notna(row["price"]) else 0.0
+            if row.get("is_manual"):
+                c3.write(f"{display_price:.5f}" if display_price else "—")
+                price_val = display_price
+            else:
+                price_val = c3.number_input(
+                    "Prix", min_value=0.0, step=0.001, format="%.5f", value=display_price,
+                    key=f"price_{club}_{round(display_price, 5) if display_price else 0}",
+                    label_visibility="collapsed",
+                )
 
             change = row.get("price_change_24h")
             if pd.notna(change):
@@ -579,13 +598,25 @@ with tab_dashboard:
                 components.html(btn_html, height=42)
 
         st.write("")
-        if st.button("💾 Enregistrer les points/jour", type="primary"):
+        if st.button("💾 Enregistrer (dépannages de prix + points/jour)", type="primary"):
+            overrides = dict(st.session_state.get("_price_overrides", {}))
+            price_fixes = 0
             entries_to_save = []
             for _, row in matched_df.iterrows():
                 club = row["name"]
+                if not row.get("is_manual"):
+                    old_price = float(row["price"]) if pd.notna(row["price"]) else None
+                    price_key = f"price_{club}_{round(old_price, 5) if old_price is not None else 0}"
+                    new_price = st.session_state.get(price_key)
+                    # Même tolérance qu'avant (alignée sur l'affichage %.5f) :
+                    # évite de repartir sur le même faux-positif d'arrondi.
+                    if new_price and new_price > 0 and (old_price is None or abs(new_price - old_price) > 5e-6):
+                        overrides[club] = float(new_price)
+                        price_fixes += 1
+
                 pts = st.session_state.get(f"pts_{club}", 0)
                 if pts and pts > 0:
-                    price_for_entry = row["price"] if pd.notna(row["price"]) else None
+                    price_for_entry = overrides.get(club, row["price"] if pd.notna(row["price"]) else None)
                     tokens_qty = (capital / price_for_entry) if price_for_entry else 0.0
                     entries_to_save.append({
                         "club": club,
@@ -594,9 +625,18 @@ with tab_dashboard:
                         "price_at_entry": price_for_entry,
                     })
 
+            if price_fixes:
+                st.session_state["_price_overrides"] = overrides
             if entries_to_save:
                 storage.add_entries_bulk(entries_to_save)
-                st.success(f"{len(entries_to_save)} saisie(s) de points/jour enregistrée(s) le {datetime.now().strftime('%d/%m/%Y')}.")
+
+            if price_fixes or entries_to_save:
+                msg = []
+                if price_fixes:
+                    msg.append(f"{price_fixes} prix dépanné(s)")
+                if entries_to_save:
+                    msg.append(f"{len(entries_to_save)} saisie(s) de points/jour")
+                st.success(" et ".join(msg) + f" enregistré(s) le {datetime.now().strftime('%d/%m/%Y')}.")
                 st.rerun(scope="app")
             else:
                 st.toast("Rien à enregistrer.", icon="ℹ️")
