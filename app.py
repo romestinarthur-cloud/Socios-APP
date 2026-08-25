@@ -301,44 +301,36 @@ def build_dataframe(
         club = team["name"]
         row = dict(team)
 
-        if club in no_token_flags:
-            row.update(matched=False, price=None, price_change_24h=None)
-        else:
-            found = price_data.get(club)
-            if found:
-                row.update(matched=True, price=found["price"], price_change_24h=found["change_24h"])
-            else:
-                # Slug deviné/enregistré introuvable sur fantokens.com (404) ou
-                # échec réseau ponctuel pour ce club -> zone de saisie manuelle.
-                row.update(matched=False, price=None, price_change_24h=None)
-
-        # Prix saisi à la main : ne s'applique que si sa devise correspond à la
-        # devise actuellement sélectionnée (sinon on redemande la saisie).
-        manual = manual_prices.get(club)
+        # Seule source de vérité pour "saisie manuelle" : la case "aucun
+        # token trouvé" (no_token_flags). Coché -> toujours le prix tapé à la
+        # main. Pas coché -> toujours le prix automatique de fantokens.com,
+        # jamais de "correction" qui reste bloquée indéfiniment.
+        row["auto_matched"] = False
         row["needs_currency_reentry"] = False
-        auto_price_available = row["matched"]  # avant override manuel, cf. ci-dessus
-        row["auto_matched"] = auto_price_available  # gardé pour is_fallback plus bas
-        if manual is not None and manual.get("price") is not None:
-            # Un prix "de secours" (tapé faute de prix auto) doit céder la
-            # place dès qu'un prix automatique redevient disponible pour ce
-            # club — sinon il resterait affiché pour toujours même après
-            # correction du slug (cf. bug : compteur "prix manuels" qui ne
-            # redescend jamais). Une correction volontaire (is_fallback=False)
-            # reste prioritaire quoi qu'il arrive.
-            stale_fallback = manual.get("is_fallback") and auto_price_available
-            if stale_fallback:
-                row["is_manual"] = False
-            elif manual.get("currency") == vs_currency:
-                row["is_manual"] = True
-                row["matched"] = True
-                row["price"] = manual["price"]
-                row["price_change_24h"] = None
+        if club in no_token_flags:
+            manual = manual_prices.get(club)
+            if manual is not None and manual.get("price") is not None:
+                if manual.get("currency") == vs_currency:
+                    row["is_manual"] = True
+                    row.update(matched=True, price=manual["price"], price_change_24h=None)
+                else:
+                    row["is_manual"] = False
+                    row["needs_currency_reentry"] = True
+                    row.update(matched=False, price=None, price_change_24h=None)
             else:
-                row["needs_currency_reentry"] = True
                 row["is_manual"] = False
                 row.update(matched=False, price=None, price_change_24h=None)
         else:
             row["is_manual"] = False
+            found = price_data.get(club)
+            if found:
+                row["auto_matched"] = True
+                row.update(matched=True, price=found["price"], price_change_24h=found["change_24h"])
+            else:
+                # Slug deviné/enregistré introuvable sur fantokens.com (404) ou
+                # échec réseau ponctuel pour ce club -> pas de prix tant que
+                # le slug n'est pas corrigé, ou que "aucun token" n'est coché.
+                row.update(matched=False, price=None, price_change_24h=None)
 
         enriched.append(row)
 
@@ -529,18 +521,13 @@ with tab_dashboard:
             c1.image(row["logo"], width=30)
             c2.write(club)
 
-            price_val = c3.number_input(
-                "Prix", min_value=0.0, step=0.001, format="%.5f",
-                value=float(row["price"]) if pd.notna(row["price"]) else 0.0,
-                # La clé inclut le prix actuel (pas juste le club) : si ce prix
-                # change ailleurs (zone de saisie manuelle du haut, puis rerun
-                # complet), Streamlit voit une clé DIFFÉRENTE et recrée le
-                # widget avec la nouvelle valeur, au lieu de garder l'ancienne
-                # en mémoire indéfiniment. C'est ce qui manquait pour que le
-                # tableau du bas suive vraiment ce qui est saisi en haut.
-                key=f"price_{club}_{round(float(row['price']), 5) if pd.notna(row['price']) else 0}",
-                label_visibility="collapsed",
-            )
+            # Le prix n'est éditable QUE pour les clubs cochés "aucun token
+            # trouvé" (zone du haut) : pour tous les autres, le prix
+            # automatique de fantokens.com s'affiche en lecture seule — c'est
+            # ce qui empêche qu'un club se retrouve coincé en "correction
+            # manuelle" sans qu'on l'ait décidé.
+            price_val = float(row["price"]) if pd.notna(row["price"]) else 0.0
+            c3.write(f"{price_val:.5f}" if price_val else "—")
 
             change = row.get("price_change_24h")
             if pd.notna(change):
@@ -553,7 +540,7 @@ with tab_dashboard:
             c5.write(f"{tokens_val:.2f}")
 
             c6.number_input(
-                "Points/jour", min_value=0.0, step=0.1, value=0.0,
+                "Points/jour", min_value=0, step=1, value=0,
                 key=f"pts_{club}", label_visibility="collapsed",
             )
 
@@ -592,27 +579,13 @@ with tab_dashboard:
                 components.html(btn_html, height=42)
 
         st.write("")
-        if st.button("💾 Enregistrer (prix corrigés + points/jour)", type="primary"):
-            price_changes = 0
+        if st.button("💾 Enregistrer les points/jour", type="primary"):
             entries_to_save = []
             for _, row in matched_df.iterrows():
                 club = row["name"]
-                old_price = float(row["price"]) if pd.notna(row["price"]) else None
-                price_key = f"price_{club}_{round(old_price, 5) if old_price is not None else 0}"
-                new_price = st.session_state.get(price_key)
-                if new_price and new_price > 0 and (old_price is None or abs(new_price - old_price) > 1e-9):
-                    # is_fallback=True pour un club sans prix auto (le prix manuel
-                    # cédera la place dès qu'un prix auto redevient disponible),
-                    # False pour une correction volontaire d'un prix déjà trouvé
-                    # (reste prioritaire indéfiniment).
-                    storage.save_manual_price(
-                        club, float(new_price), devise, is_fallback=not row.get("auto_matched", False)
-                    )
-                    price_changes += 1
-
-                pts = st.session_state.get(f"pts_{club}", 0.0)
+                pts = st.session_state.get(f"pts_{club}", 0)
                 if pts and pts > 0:
-                    price_for_entry = new_price if new_price and new_price > 0 else old_price
+                    price_for_entry = row["price"] if pd.notna(row["price"]) else None
                     tokens_qty = (capital / price_for_entry) if price_for_entry else 0.0
                     entries_to_save.append({
                         "club": club,
@@ -623,15 +596,8 @@ with tab_dashboard:
 
             if entries_to_save:
                 storage.add_entries_bulk(entries_to_save)
-
-            if price_changes or entries_to_save:
-                msg = []
-                if price_changes:
-                    msg.append(f"{price_changes} prix corrigé(s)")
-                if entries_to_save:
-                    msg.append(f"{len(entries_to_save)} saisie(s) de points/jour")
-                st.success(" et ".join(msg) + f" enregistré(s) le {datetime.now().strftime('%d/%m/%Y')}.")
-                st.rerun(scope="app")  # rerun complet : le prix impacte les autres onglets
+                st.success(f"{len(entries_to_save)} saisie(s) de points/jour enregistrée(s) le {datetime.now().strftime('%d/%m/%Y')}.")
+                st.rerun(scope="app")
             else:
                 st.toast("Rien à enregistrer.", icon="ℹ️")
 
@@ -1002,7 +968,7 @@ with tab_portfolio:
             placeholder="Choisir un club...", index=None,
         )
         qty_choice = c2.number_input(
-            "Quantité détenue", min_value=0.0, step=1.0, key="_pf_add_qty",
+            "Quantité détenue", min_value=0, step=1, key="_pf_add_qty",
             label_visibility="collapsed", placeholder="Quantité",
         )
         if c3.button("💾 Enregistrer", key="_pf_add_btn", use_container_width=True):
@@ -1034,7 +1000,7 @@ with tab_portfolio:
                 else 0.0
             )
             hc3.number_input(
-                "Points gagnés", min_value=0.0, step=0.1, value=float(default_pts),
+                "Points gagnés", min_value=0, step=1, value=int(default_pts),
                 key=f"_pf_pts_{club}_{pf_entry_date.isoformat()}", label_visibility="collapsed",
             )
             if last:
