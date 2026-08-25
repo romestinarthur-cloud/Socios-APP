@@ -104,6 +104,11 @@ def guess_slug(club_name: str) -> str:
 
 _PRICE_RE = re.compile(r"\$\s?([\d\s]+[.,]\d+|\d+)")
 _CHANGE_RE = re.compile(r"([\-\u2212]?\s?\d+[.,]?\d*)\s*%\s*\(24h\)")
+# Filet de sécurité si fantokens.com change légèrement la mise en forme
+# ("(24h)" disparaît, majuscule différente...) : on cherche alors juste un
+# pourcentage juste après le prix (fenêtre de 60 caractères), sans exiger le
+# suffixe "(24h)" exact.
+_CHANGE_FALLBACK_RE = re.compile(r"([\-\u2212+]?\s?\d+[.,]\d+)\s*%")
 
 
 def _parse_fr_number(raw: str) -> float:
@@ -146,6 +151,11 @@ def fetch_fantoken_page(slug: str, timeout: int = 8):
         return None
 
     change_match = _CHANGE_RE.search(text)
+    if not change_match:
+        # Fallback : pourcentage juste après le prix, dans une petite fenêtre
+        # de texte, sans exiger "(24h)" collé juste derrière.
+        window_start = price_match.end()
+        change_match = _CHANGE_FALLBACK_RE.search(text, window_start, window_start + 60)
     change_24h = None
     if change_match:
         try:
