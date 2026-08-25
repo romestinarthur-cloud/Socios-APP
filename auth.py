@@ -25,22 +25,31 @@ def _login_form():
     )
     col = st.columns([1, 1, 1])[1]
     with col:
-        st.markdown("## 🔒 Connexion")
-        with st.form("login_form", clear_on_submit=False):
-            username = st.text_input("Identifiant")
-            password = st.text_input("Mot de passe", type="password")
-            submitted = st.form_submit_button("Se connecter", use_container_width=True)
+        placeholder = st.empty()
+        with placeholder.container():
+            st.markdown("## 🔒 Connexion")
+            with st.form("login_form", clear_on_submit=False):
+                username = st.text_input("Identifiant")
+                password = st.text_input("Mot de passe", type="password")
+                submitted = st.form_submit_button("Se connecter", use_container_width=True)
         if submitted:
-            # Retour visuel immédiat : sans ça, l'écran ne bouge pas pendant
-            # la vérification + le chargement complet de l'appli qui suit,
-            # et on croit que la touche Entrée / le clic n'a rien fait.
-            with st.spinner("Connexion..."):
-                user = storage.verify_user(username, password)
+            # Le formulaire disparaît complètement pendant la vérification
+            # (au lieu de rester affiché avec un spinner en dessous) : sinon
+            # on ne sait plus si on est connecté ou pas pendant que la suite
+            # de l'appli se charge.
+            placeholder.empty()
+            with placeholder.container():
+                st.markdown("## 🔒 Connexion")
+                with st.spinner("Connexion..."):
+                    user = storage.verify_user(username, password)
             if user:
                 st.session_state["auth_user"] = user
                 st.rerun()
             else:
-                st.error("Identifiant ou mot de passe incorrect.")
+                placeholder.empty()
+                with placeholder.container():
+                    st.markdown("## 🔒 Connexion")
+                    st.error("Identifiant ou mot de passe incorrect.")
 
 
 def _user_management_panel():
