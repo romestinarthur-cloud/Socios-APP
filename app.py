@@ -1064,15 +1064,21 @@ with tab_portfolio:
                     storage.delete_portfolio_holding(_pf_username, club)
                     st.rerun(scope="fragment")
 
-    _portfolio_holdings_fragment()
+        # Stats DANS ce même fragment (et pas plus bas dans le script) : le
+        # bouton "Enregistrer les points du jour" ci-dessus ne redéclenche que
+        # ce fragment (rerun scope="fragment", plus rapide qu'un rechargement
+        # complet). Si les stats étaient en dehors, comme le total et la
+        # courbe l'étaient avant, elles restaient figées sur les anciennes
+        # valeurs tant qu'on ne rechargeait pas toute la page.
+        st.divider()
+        st.subheader("📊 Stats de staking")
 
-    st.divider()
-    st.subheader("📊 Stats de staking")
+        pf_history = storage.get_portfolio_history(_pf_username)
+        if not pf_history:
+            st.info("Aucune saisie de points pour l'instant — ajoute des tokens et note leurs points/jour ci-dessus.")
+            return
 
-    pf_history = storage.get_portfolio_history(_pf_username)
-    if not pf_history:
-        st.info("Aucune saisie de points pour l'instant — ajoute des tokens et note leurs points/jour ci-dessus.")
-    else:
+        import altair as alt
         pf_df = pd.DataFrame(pf_history)
         pf_clubs = sorted(pf_df["club"].unique())
 
@@ -1094,7 +1100,6 @@ with tab_portfolio:
         st.write("")
 
         st.markdown("###### Total staké par jour (tous tokens confondus)")
-        import altair as alt
         total_chart = alt.Chart(totals_by_date).encode(
             x=alt.X("entry_date:N", title="Date"),
             y=alt.Y("points_earned:Q", title="Total points/jour"),
@@ -1105,26 +1110,21 @@ with tab_portfolio:
         )
 
         st.markdown("###### Évolution par token")
-
-        @st.fragment
-        def _portfolio_stats_fragment():
-            chosen_pf = st.multiselect(
-                "Tokens à afficher", pf_clubs, default=pf_clubs[: min(5, len(pf_clubs))],
-                key="_pf_stats_clubs",
+        chosen_pf = st.multiselect(
+            "Tokens à afficher", pf_clubs, default=pf_clubs[: min(5, len(pf_clubs))],
+            key="_pf_stats_clubs",
+        )
+        if chosen_pf:
+            plot_pf = pf_df[pf_df["club"].isin(chosen_pf)][["entry_date", "club", "points_earned"]]
+            base = alt.Chart(plot_pf).encode(
+                x=alt.X("entry_date:N", title="Date"),
+                y=alt.Y("points_earned:Q", title="Points gagnés"),
+                color=alt.Color("club:N", title="Token"),
             )
-            if chosen_pf:
-                plot_pf = pf_df[pf_df["club"].isin(chosen_pf)][["entry_date", "club", "points_earned"]]
-                base = alt.Chart(plot_pf).encode(
-                    x=alt.X("entry_date:N", title="Date"),
-                    y=alt.Y("points_earned:Q", title="Points gagnés"),
-                    color=alt.Color("club:N", title="Token"),
-                )
-                chart = (base.mark_line(point=True) + base.mark_point(size=60)).properties(height=380)
-                st.altair_chart(chart, use_container_width=True)
-            else:
-                st.info("Sélectionne au moins un token pour afficher le graphique.")
-
-        _portfolio_stats_fragment()
+            chart = (base.mark_line(point=True) + base.mark_point(size=60)).properties(height=380)
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.info("Sélectionne au moins un token pour afficher le graphique.")
 
         with st.expander("Voir tout l'historique (supprimer une saisie)"):
             hist_pf_df = pf_df[["id", "club", "entry_date", "points_earned"]].rename(columns={
@@ -1139,4 +1139,6 @@ with tab_portfolio:
                 dc3.write(f'{r["points_earned"]} pts')
                 if dc4.button("🗑️", key=f"_pf_del_hist_{r['id']}"):
                     storage.delete_portfolio_entry(_pf_username, r["id"])
-                    st.rerun()
+                    st.rerun(scope="fragment")
+
+    _portfolio_holdings_fragment()
