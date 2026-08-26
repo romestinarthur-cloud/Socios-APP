@@ -121,6 +121,34 @@ _CHANGE_RE = re.compile(r"([\-\u2212+]?\s?\d+[.,]\d+)\s*%")
 _META_CHANGE_RE = re.compile(r"varié\s+de\s*([\-\u2212+]?\s?\d+[.,]?\d*)\s*%")
 
 
+# Sur fantokens.com, la hausse/baisse n'est JAMAIS écrite dans le texte (ni
+# dans le texte visible, ni dans la meta description) : elle n'est indiquée
+# QUE par la couleur (vert/rouge, classes CSS type Tailwind) de l'élément
+# affichant le pourcentage. Sans regarder la classe CSS, impossible de
+# distinguer +2% de -2% à partir du texte seul.
+_NEGATIVE_CLASS_HINTS = ("red", "danger", "negative", "loss", "down", "decrease", "fall")
+_POSITIVE_CLASS_HINTS = ("green", "success", "positive", "gain", "up", "increase", "rise")
+
+
+def _detect_change_sign(soup) -> bool | None:
+    """True si baisse (rouge), False si hausse (vert), None si indétectable
+    (dans ce cas on affichera le pourcentage sans signe, comme avant)."""
+    node = soup.find(string=re.compile(r"%\s*\(24h\)"))
+    if node is None:
+        return None
+    el = node.parent
+    for _ in range(5):
+        if el is None:
+            break
+        classes = " ".join(el.get("class", [])).lower() if el.get("class") else ""
+        if any(hint in classes for hint in _NEGATIVE_CLASS_HINTS):
+            return True
+        if any(hint in classes for hint in _POSITIVE_CLASS_HINTS):
+            return False
+        el = el.parent
+    return None
+
+
 def _parse_fr_number(raw: str) -> float:
     """'0,486116' ou '1 234,56' -> float. Les pages fantokens.com sont en
     français : virgule décimale, espace comme séparateur de milliers."""
@@ -182,6 +210,15 @@ def fetch_fantoken_page(slug: str, timeout: int = 8):
                 change_24h = _parse_fr_number(change_match.group(1))
             except ValueError:
                 change_24h = None
+
+    # Le signe n'est jamais dans le texte (ni meta, ni visible) sur ce site —
+    # seulement dans la couleur CSS. On applique cette détection par-dessus
+    # la magnitude trouvée ci-dessus (toujours positive jusqu'ici).
+    if change_24h is not None:
+        change_24h = abs(change_24h)
+        is_negative = _detect_change_sign(soup)
+        if is_negative:
+            change_24h = -change_24h
 
     title_tag = soup.find("h1")
     name = title_tag.get_text(strip=True) if title_tag else slug
