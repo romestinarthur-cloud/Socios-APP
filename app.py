@@ -297,6 +297,14 @@ def build_dataframe(
             price_data = {}
             prices_ok = False
             st.session_state["_prices_error"] = str(e)
+        # Un échec réseau ponctuel sur UN club (timeout, site lent ce jour-là)
+        # ne doit pas faire disparaître son prix alors qu'il marchait bien
+        # juste avant : on complète les clubs manquants dans ce nouveau
+        # résultat avec leur dernière valeur connue, au lieu de remplacer tout
+        # le cache d'un bloc.
+        if cached_prices:
+            for club, old_value in cached_prices["data"].items():
+                price_data.setdefault(club, old_value)
         st.session_state["_price_data_cache"] = {
             "key": price_cache_key, "data": price_data, "ok": prices_ok,
         }
@@ -664,21 +672,6 @@ with tab_mapping:
         "ça correspond bien. Coche « aucun token » si le club n'a vraiment aucun "
         "Fan Token (le prix reste alors saisi à la main dans l'onglet Saisie)."
     )
-
-    with st.expander("🔍 Diagnostic : pourquoi le signe (+/-) de la variation 24h n'est pas détecté"):
-        diag_club = st.selectbox(
-            "Club à tester", sorted(df["name"].unique().tolist()), key="_diag_sign_club",
-            index=None, placeholder="Choisis un club dont tu sais qu'il est en baisse en ce moment...",
-        )
-        if diag_club and st.button("Lancer le test", key="_diag_sign_run"):
-            diag_slug = saved_mappings.get(diag_club) or guess_slug(diag_club)
-            page = fetch_fantoken_page(diag_slug)
-            if page is None:
-                st.error("Rien reçu pour ce slug.")
-            else:
-                st.write(f"**Variation détectée :** {page['change_24h']}")
-                st.caption("HTML brut autour du \"% (24h)\" (cherche le nom de la classe CSS ici) :")
-                st.code(page.get("debug_html") or "(pas trouvé sur cette page)", language="html")
 
     for _, row in df.iterrows():
         club = row["name"]
