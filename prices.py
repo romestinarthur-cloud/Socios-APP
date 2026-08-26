@@ -126,8 +126,8 @@ _META_CHANGE_RE = re.compile(r"varié\s+de\s*([\-\u2212+]?\s?\d+[.,]?\d*)\s*%")
 # QUE par la couleur (vert/rouge, classes CSS type Tailwind) de l'élément
 # affichant le pourcentage. Sans regarder la classe CSS, impossible de
 # distinguer +2% de -2% à partir du texte seul.
-_NEGATIVE_CLASS_HINTS = ("red", "danger", "negative", "loss", "down", "decrease", "fall")
-_POSITIVE_CLASS_HINTS = ("green", "success", "positive", "gain", "up", "increase", "rise")
+_NEGATIVE_CLASS_HINTS = ("text-price-down", "red", "danger", "negative", "loss", "down", "decrease", "fall")
+_POSITIVE_CLASS_HINTS = ("text-price-up", "green", "success", "positive", "gain", "up", "increase", "rise")
 
 
 def _detect_change_sign(soup, magnitude: float) -> bool | None:
