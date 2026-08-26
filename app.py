@@ -272,7 +272,13 @@ def build_dataframe(
     # donnait l'impression de "tout re-télécharger" à chaque petite mise à
     # jour. Ici, un prix manuel ne touche PAS aux prix auto : pas besoin de
     # rappeler load_prices du tout pour que la mise à jour se voie.
-    price_cache_key = (vs_currency, tuple(sorted(club_slugs.items())))
+    # Clé de cache basée sur QUELS clubs existent, pas sur la valeur de leur
+    # slug : corriger le slug d'un seul club (onglet Correspondances ->
+    # "Vérifier") changeait cette valeur et invalidait TOUT le cache, donc
+    # re-scrapait les 65 clubs pour la correction d'un seul. Le nouveau prix
+    # de ce club-là est directement injecté dans le cache par le bouton
+    # "Vérifier" lui-même (cf. tab_mapping), donc pas besoin d'invalider ici.
+    price_cache_key = (vs_currency, frozenset(club_slugs.keys()))
     cached_prices = st.session_state.get("_price_data_cache")
     if cached_prices and cached_prices["key"] == price_cache_key:
         price_data = cached_prices["data"]
@@ -694,6 +700,15 @@ with tab_mapping:
                 # extra_clubs à chaque appel, le nouveau logo apparaît donc
                 # dès le prochain rerun sans re-scraper socios.com.
                 storage.confirm_verification(club, new_slug, found.get("logo"))
+                # Injecté directement dans le cache de session (au lieu de le
+                # laisser recalculer sa clé et tout re-scraper) : la ligne
+                # Saisie affiche donc ce nouveau prix dès le prochain rerun,
+                # sans requête réseau pour les 64 autres clubs.
+                cache = st.session_state.get("_price_data_cache")
+                if cache is not None:
+                    cache["data"][club] = {
+                        "price": found["price_usd"], "change_24h": found["change_24h"],
+                    }
                 st.toast(f'Trouvé : {found["name"]} — ${found["price_usd"]:.5f}. Enregistré.', icon="✅")
                 st.rerun()
             else:
