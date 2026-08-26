@@ -66,7 +66,7 @@ MANUAL_SLUG_OVERRIDES = {
 }
 
 
-def _get_with_retry(url: str, timeout: int = 15, retries: int = 1, params: dict | None = None):
+def _get_with_retry(url: str, timeout: int = 8, retries: int = 1, params: dict | None = None):
     """GET avec retry. Retourne None sur 404 (page/slug inexistant),
     lève une exception réseau après épuisement des tentatives."""
     last_exc = None
@@ -130,22 +130,33 @@ _NEGATIVE_CLASS_HINTS = ("red", "danger", "negative", "loss", "down", "decrease"
 _POSITIVE_CLASS_HINTS = ("green", "success", "positive", "gain", "up", "increase", "rise")
 
 
-def _detect_change_sign(soup) -> bool | None:
+def _detect_change_sign(soup, magnitude: float) -> bool | None:
     """True si baisse (rouge), False si hausse (vert), None si indétectable
-    (dans ce cas on affichera le pourcentage sans signe, comme avant)."""
-    node = soup.find(string=re.compile(r"%\s*\(24h\)"))
-    if node is None:
-        return None
-    el = node.parent
-    for _ in range(5):
-        if el is None:
-            break
-        classes = " ".join(el.get("class", [])).lower() if el.get("class") else ""
+    (dans ce cas on affichera le pourcentage sans signe, comme avant).
+
+    Ne cherche PAS le texte "(24h)" précisément (souvent absent du texte
+    visible sur certaines pages — c'est pour ça que la magnitude vient de la
+    meta description). Cherche plutôt N'IMPORTE QUEL petit élément coloré
+    (classe CSS rouge/vert) dont le texte contient un pourcentage qui
+    correspond à la magnitude déjà trouvée."""
+    for tag in soup.find_all(class_=True):
+        tag_text = tag.get_text(strip=True)
+        if "%" not in tag_text or len(tag_text) > 25:
+            continue
+        pct_match = re.search(r"([\d\s]+[.,]?\d*)\s*%", tag_text)
+        if not pct_match:
+            continue
+        try:
+            tag_value = abs(_parse_fr_number(pct_match.group(1)))
+        except ValueError:
+            continue
+        if abs(tag_value - magnitude) > 0.05:
+            continue  # pas le même nombre -> pas le bon élément
+        classes = " ".join(tag.get("class", [])).lower()
         if any(hint in classes for hint in _NEGATIVE_CLASS_HINTS):
             return True
         if any(hint in classes for hint in _POSITIVE_CLASS_HINTS):
             return False
-        el = el.parent
     return None
 
 
@@ -156,7 +167,7 @@ def _parse_fr_number(raw: str) -> float:
     return float(cleaned)
 
 
-def fetch_fantoken_page(slug: str, timeout: int = 15):
+def fetch_fantoken_page(slug: str, timeout: int = 8):
     """Scrape https://www.fantokens.com/fr/trade/<slug>.
     Retourne {"price_usd": float, "change_24h": float|None, "name": str,
     "logo": str|None} ou None si le slug n'existe pas (page 404) ou si le
@@ -216,7 +227,7 @@ def fetch_fantoken_page(slug: str, timeout: int = 15):
     # la magnitude trouvée ci-dessus (toujours positive jusqu'ici).
     if change_24h is not None:
         change_24h = abs(change_24h)
-        is_negative = _detect_change_sign(soup)
+        is_negative = _detect_change_sign(soup, change_24h)
         if is_negative:
             change_24h = -change_24h
 
@@ -227,14 +238,15 @@ def fetch_fantoken_page(slug: str, timeout: int = 15):
 
     # HTML brut autour de l'élément "% (24h)", pour diagnostiquer pourquoi la
     # couleur (donc le signe) n'est pas détectée pour ce club en particulier.
-    debug_html = None
-    node = soup.find(string=re.compile(r"%\s*\(24h\)"))
-    if node is not None:
-        el = node.parent
-        for _ in range(3):
-            if el and el.parent:
-                el = el.parent
-        debug_html = str(el)[:600] if el else None
+    # Tous les petits éléments contenant un "%" avec leurs classes CSS —
+    # pour repérer à l'œil lequel est le bon si la détection automatique
+    # (comparaison de magnitude) ne trouve toujours pas la bonne classe.
+    debug_pct_elements = []
+    for tag in soup.find_all(class_=True):
+        tag_text = tag.get_text(strip=True)
+        if "%" in tag_text and len(tag_text) <= 25:
+            debug_pct_elements.append(f'{tag.name}.{" ".join(tag.get("class", []))} -> "{tag_text}"')
+    debug_html = "\n".join(debug_pct_elements[:15]) if debug_pct_elements else None
 
     return {
         "price_usd": price_usd, "change_24h": change_24h, "name": name, "logo": logo,
