@@ -225,7 +225,21 @@ def fetch_fantoken_page(slug: str, timeout: int = 8):
 
     logo = _extract_logo(soup, title_tag, name)
 
-    return {"price_usd": price_usd, "change_24h": change_24h, "name": name, "logo": logo}
+    # HTML brut autour de l'élément "% (24h)", pour diagnostiquer pourquoi la
+    # couleur (donc le signe) n'est pas détectée pour ce club en particulier.
+    debug_html = None
+    node = soup.find(string=re.compile(r"%\s*\(24h\)"))
+    if node is not None:
+        el = node.parent
+        for _ in range(3):
+            if el and el.parent:
+                el = el.parent
+        debug_html = str(el)[:600] if el else None
+
+    return {
+        "price_usd": price_usd, "change_24h": change_24h, "name": name, "logo": logo,
+        "debug_html": debug_html,
+    }
 
 
 def _extract_logo(soup: BeautifulSoup, title_tag, name: str) -> str | None:
