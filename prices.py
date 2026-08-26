@@ -110,6 +110,15 @@ _PRICE_RE = re.compile(r"\$\s?([\d\s]+[.,]\d+|\d+)")
 # (majuscule, espace, tournure différente) tant que c'est bien le premier %
 # de la page après le prix.
 _CHANGE_RE = re.compile(r"([\-\u2212+]?\s?\d+[.,]\d+)\s*%")
+# Source BEAUCOUP plus fiable que le texte visible de la page (qui peut être
+# injecté par JavaScript et donc absent du HTML brut reçu par `requests`) :
+# la balise <meta name="description"> est générée côté serveur pour le SEO,
+# donc TOUJOURS présente dans le HTML brut, et contient prix + variation
+# dans une phrase fixe, ex (page /fr/trade/...) :
+# "Le prix du Fan Token Paris Saint-Germain est aujourd'hui de $0,87259,
+#  avec un volume de trading sur 24 heures de $2.27M. Le prix du PSG a
+#  varié de 0.61484% au cours des dernières 24 heures."
+_META_CHANGE_RE = re.compile(r"varié\s+de\s*([\-\u2212+]?\s?\d+[.,]?\d*)\s*%")
 
 
 def _parse_fr_number(raw: str) -> float:
@@ -151,13 +160,28 @@ def fetch_fantoken_page(slug: str, timeout: int = 8):
     except ValueError:
         return None
 
-    change_match = _CHANGE_RE.search(text, price_match.end())
     change_24h = None
-    if change_match:
-        try:
-            change_24h = _parse_fr_number(change_match.group(1))
-        except ValueError:
-            change_24h = None
+    # 1. Balise meta description (SEO, toujours dans le HTML brut serveur —
+    #    contrairement au texte visible, qui peut être injecté par JS et donc
+    #    absent de ce que `requests` reçoit).
+    meta_tag = soup.find("meta", attrs={"name": "description"})
+    meta_content = meta_tag.get("content") if meta_tag else None
+    if meta_content:
+        meta_match = _META_CHANGE_RE.search(meta_content)
+        if meta_match:
+            try:
+                change_24h = _parse_fr_number(meta_match.group(1))
+            except ValueError:
+                change_24h = None
+    # 2. Sinon, filet de sécurité : premier pourcentage après le prix dans le
+    #    texte visible de la page (fonctionnait déjà pour certains clubs).
+    if change_24h is None:
+        change_match = _CHANGE_RE.search(text, price_match.end())
+        if change_match:
+            try:
+                change_24h = _parse_fr_number(change_match.group(1))
+            except ValueError:
+                change_24h = None
 
     title_tag = soup.find("h1")
     name = title_tag.get_text(strip=True) if title_tag else slug
