@@ -231,7 +231,7 @@ def load_prices(club_slugs: dict, vs_currency: str) -> dict:
     if not items:
         return {}
     results = {}
-    with ThreadPoolExecutor(max_workers=min(24, len(items))) as executor:
+    with ThreadPoolExecutor(max_workers=min(16, len(items))) as executor:
         future_to_club = {
             executor.submit(load_single_price, club, slug, vs_currency, fx_rate): club
             for club, slug in items
