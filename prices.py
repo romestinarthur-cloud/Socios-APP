@@ -66,13 +66,24 @@ MANUAL_SLUG_OVERRIDES = {
 }
 
 
-def _get_with_retry(url: str, timeout: int = 8, retries: int = 1, params: dict | None = None):
+# Session partagée (garde les connexions HTTP ouvertes vers fantokens.com
+# entre les requêtes au lieu de renégocier TCP/TLS à chaque fois — gain
+# sensible avec autant de requêtes vers le même site). pool_maxsize doit
+# couvrir le nombre de requêtes lancées en parallèle (cf. max_workers dans
+# app.py) sinon les threads en surplus attendent qu'une connexion se libère.
+_SESSION = requests.Session()
+_adapter = requests.adapters.HTTPAdapter(pool_connections=64, pool_maxsize=64)
+_SESSION.mount("https://", _adapter)
+_SESSION.mount("http://", _adapter)
+
+
+def _get_with_retry(url: str, timeout: int = 15, retries: int = 2, params: dict | None = None):
     """GET avec retry. Retourne None sur 404 (page/slug inexistant),
     lève une exception réseau après épuisement des tentatives."""
     last_exc = None
     for attempt in range(retries + 1):
         try:
-            r = requests.get(url, headers=REQUEST_HEADERS, timeout=timeout, params=params)
+            r = _SESSION.get(url, headers=REQUEST_HEADERS, timeout=timeout, params=params)
             if r.status_code == 404:
                 return None
             if r.status_code == 429:
@@ -167,7 +178,7 @@ def _parse_fr_number(raw: str) -> float:
     return float(cleaned)
 
 
-def fetch_fantoken_page(slug: str, timeout: int = 8):
+def fetch_fantoken_page(slug: str, timeout: int = 15):
     """Scrape https://www.fantokens.com/fr/trade/<slug>.
     Retourne {"price_usd": float, "change_24h": float|None, "name": str,
     "logo": str|None} ou None si le slug n'existe pas (page 404) ou si le
