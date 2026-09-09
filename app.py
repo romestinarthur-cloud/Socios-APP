@@ -1146,21 +1146,26 @@ with tab_portfolio:
         )
 
         st.markdown("###### Évolution par token")
-        chosen_pf = st.multiselect(
-            "Tokens à afficher", pf_clubs, default=pf_clubs[: min(5, len(pf_clubs))],
-            key="_pf_stats_clubs",
-        )
-        if chosen_pf:
-            plot_pf = pf_df[pf_df["club"].isin(chosen_pf)][["entry_date", "club", "points_earned"]]
-            base = alt.Chart(plot_pf).encode(
-                x=alt.X("entry_date:N", title="Date"),
-                y=alt.Y("points_earned:Q", title="Points gagnés"),
-                color=alt.Color("club:N", title="Token"),
+
+        @st.fragment
+        def _portfolio_stats_chart_fragment():
+            chosen_pf = st.multiselect(
+                "Tokens à afficher", pf_clubs, default=pf_clubs[: min(5, len(pf_clubs))],
+                key="_pf_stats_clubs",
             )
-            chart = (base.mark_line(point=True) + base.mark_point(size=60)).properties(height=380)
-            st.altair_chart(chart, use_container_width=True)
-        else:
-            st.info("Sélectionne au moins un token pour afficher le graphique.")
+            if chosen_pf:
+                plot_pf = pf_df[pf_df["club"].isin(chosen_pf)][["entry_date", "club", "points_earned"]]
+                base = alt.Chart(plot_pf).encode(
+                    x=alt.X("entry_date:N", title="Date"),
+                    y=alt.Y("points_earned:Q", title="Points gagnés"),
+                    color=alt.Color("club:N", title="Token"),
+                )
+                chart = (base.mark_line(point=True) + base.mark_point(size=60)).properties(height=380)
+                st.altair_chart(chart, use_container_width=True)
+            else:
+                st.info("Sélectionne au moins un token pour afficher le graphique.")
+
+        _portfolio_stats_chart_fragment()
 
         with st.expander("Voir tout l'historique (supprimer une saisie)"):
             hist_pf_df = pf_df[["id", "club", "entry_date", "points_earned"]].rename(columns={
