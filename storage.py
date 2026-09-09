@@ -181,11 +181,13 @@ def init_db():
             username TEXT NOT NULL,
             club TEXT NOT NULL,
             tokens_qty REAL NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (username, club)
         )
         """
     )
+    cur.execute(f"ALTER TABLE {PORTFOLIO_TABLE} ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0")
     cur.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {PORTFOLIO_HISTORY_TABLE} (
@@ -361,10 +363,14 @@ def add_entries_bulk(entries: list[dict]):
 # ---------------------------------------------------------------------------
 
 def get_portfolio_holdings(username: str) -> dict:
-    """club -> quantité de tokens réellement détenue, pour CET utilisateur."""
+    """club -> quantité de tokens réellement détenue, pour CET utilisateur.
+    Ordonné selon sort_order (l'ordre choisi à la main), pas alphabétique."""
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute(f"SELECT club, tokens_qty FROM {PORTFOLIO_TABLE} WHERE username = %s", (username,))
+    cur.execute(
+        f"SELECT club, tokens_qty FROM {PORTFOLIO_TABLE} WHERE username = %s ORDER BY sort_order ASC, club ASC",
+        (username,),
+    )
     rows = cur.fetchall()
     cur.close()
     return {r["club"]: r["tokens_qty"] for r in rows}
@@ -373,15 +379,51 @@ def get_portfolio_holdings(username: str) -> dict:
 def set_portfolio_holding(username: str, club: str, tokens_qty: float):
     conn = get_conn()
     cur = conn.cursor()
+    cur.execute(f"SELECT COALESCE(MAX(sort_order), -1) FROM {PORTFOLIO_TABLE} WHERE username = %s", (username,))
+    next_order = cur.fetchone()[0] + 1
     cur.execute(
-        f"""INSERT INTO {PORTFOLIO_TABLE} (username, club, tokens_qty, updated_at)
-            VALUES (%s, %s, %s, %s)
+        f"""INSERT INTO {PORTFOLIO_TABLE} (username, club, tokens_qty, sort_order, updated_at)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (username, club) DO UPDATE SET tokens_qty = EXCLUDED.tokens_qty,
                                                          updated_at = EXCLUDED.updated_at""",
-        (username, club, tokens_qty, datetime.now().isoformat(timespec="seconds")),
+        (username, club, tokens_qty, next_order, datetime.now().isoformat(timespec="seconds")),
     )
     conn.commit()
     cur.close()
+
+
+def move_portfolio_holding(username: str, club: str, direction: str):
+    """direction: 'up' ou 'down' — échange sort_order avec le voisin dans ce
+    sens, pour que l'ordre affiché colle à l'ordre choisi (ex: celui de
+    Socios)."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        f"SELECT club, sort_order FROM {PORTFOLIO_TABLE} WHERE username = %s ORDER BY sort_order ASC, club ASC",
+        (username,),
+    )
+    rows = cur.fetchall()
+    idx = next((i for i, r in enumerate(rows) if r["club"] == club), None)
+    if idx is None:
+        cur.close()
+        return
+    neighbor_idx = idx - 1 if direction == "up" else idx + 1
+    if neighbor_idx < 0 or neighbor_idx >= len(rows):
+        cur.close()
+        return  # déjà tout en haut / tout en bas
+    a, b = rows[idx], rows[neighbor_idx]
+    cur2 = conn.cursor()
+    cur2.execute(
+        f"UPDATE {PORTFOLIO_TABLE} SET sort_order = %s WHERE username = %s AND club = %s",
+        (b["sort_order"], username, a["club"]),
+    )
+    cur2.execute(
+        f"UPDATE {PORTFOLIO_TABLE} SET sort_order = %s WHERE username = %s AND club = %s",
+        (a["sort_order"], username, b["club"]),
+    )
+    conn.commit()
+    cur.close()
+    cur2.close()
 
 
 def delete_portfolio_holding(username: str, club: str):
