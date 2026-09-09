@@ -1051,10 +1051,17 @@ with tab_portfolio:
         pf_entry_date = st.date_input(
             "Date de la saisie", value=datetime.now().date(), key="_pf_shared_date",
         )
-        for club in sorted(holdings.keys()):
+        club_order = list(holdings.keys())  # respecte sort_order (déjà trié en base)
+        for i, club in enumerate(club_order):
             qty = holdings[club]
             last = latest_points.get(club)
-            hc1, hc2, hc3 = st.columns([2.2, 1, 1.3])
+            hc0a, hc0b, hc1, hc2, hc3 = st.columns([0.4, 0.4, 1.8, 1, 1.3])
+            if hc0a.button("↑", key=f"_pf_up_{club}", disabled=(i == 0), help="Monter"):
+                storage.move_portfolio_holding(_pf_username, club, "up")
+                st.rerun(scope="fragment")
+            if hc0b.button("↓", key=f"_pf_down_{club}", disabled=(i == len(club_order) - 1), help="Descendre"):
+                storage.move_portfolio_holding(_pf_username, club, "down")
+                st.rerun(scope="fragment")
             hc1.write(f"**{club}**")
             hc2.caption(f"{qty:g} tokens")
             default_pts = (
@@ -1086,7 +1093,7 @@ with tab_portfolio:
 
         st.write("")
         with st.expander("Retirer un token du portefeuille"):
-            for club in sorted(holdings.keys()):
+            for club in club_order:
                 rc1, rc2 = st.columns([4, 1])
                 rc1.write(f"{club} — {holdings[club]:g} tokens")
                 if rc2.button("🗑️", key=f"_pf_del_{club}"):
