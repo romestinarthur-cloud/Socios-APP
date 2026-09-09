@@ -393,36 +393,39 @@ def set_portfolio_holding(username: str, club: str, tokens_qty: float):
 
 
 def move_portfolio_holding(username: str, club: str, direction: str):
-    """direction: 'up' ou 'down' — échange sort_order avec le voisin dans ce
+    """direction: 'up' ou 'down' — échange la position avec le voisin dans ce
     sens, pour que l'ordre affiché colle à l'ordre choisi (ex: celui de
-    Socios)."""
+    Socios).
+
+    Renumérote TOUJOURS l'ensemble des lignes en 0..n-1 selon l'ordre actuel
+    avant d'échanger : les tokens ajoutés avant l'existence de cette
+    fonctionnalité partagent tous sort_order=0 (valeur par défaut), donc sans
+    cette renumérotation, échanger deux lignes à 0 ne change rien du tout."""
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        f"SELECT club, sort_order FROM {PORTFOLIO_TABLE} WHERE username = %s ORDER BY sort_order ASC, club ASC",
+        f"SELECT club FROM {PORTFOLIO_TABLE} WHERE username = %s ORDER BY sort_order ASC, club ASC",
         (username,),
     )
-    rows = cur.fetchall()
-    idx = next((i for i, r in enumerate(rows) if r["club"] == club), None)
+    clubs = [r["club"] for r in cur.fetchall()]
+    idx = clubs.index(club) if club in clubs else None
     if idx is None:
         cur.close()
         return
     neighbor_idx = idx - 1 if direction == "up" else idx + 1
-    if neighbor_idx < 0 or neighbor_idx >= len(rows):
+    if neighbor_idx < 0 or neighbor_idx >= len(clubs):
         cur.close()
         return  # déjà tout en haut / tout en bas
-    a, b = rows[idx], rows[neighbor_idx]
+    clubs[idx], clubs[neighbor_idx] = clubs[neighbor_idx], clubs[idx]
     cur2 = conn.cursor()
-    cur2.execute(
-        f"UPDATE {PORTFOLIO_TABLE} SET sort_order = %s WHERE username = %s AND club = %s",
-        (b["sort_order"], username, a["club"]),
-    )
-    cur2.execute(
-        f"UPDATE {PORTFOLIO_TABLE} SET sort_order = %s WHERE username = %s AND club = %s",
-        (a["sort_order"], username, b["club"]),
-    )
+    for order, c in enumerate(clubs):
+        cur2.execute(
+            f"UPDATE {PORTFOLIO_TABLE} SET sort_order = %s WHERE username = %s AND club = %s",
+            (order, username, c),
+        )
     conn.commit()
     cur.close()
+    cur2.close()
     cur2.close()
 
 
